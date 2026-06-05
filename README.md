@@ -29,8 +29,8 @@ opt-in secured WebSocket JSON-RPC transports over one core service API.
   and support JSON final output or NDJSON event streams.
 - Default model and thinking configuration for new Pi sessions.
 - Active-turn `steer`, `follow-up`, and `abort`.
-- Pi session `fork`, `clone`, rename, settings, models, usage, commands,
-  context stats, compaction, bash, and HTML export commands.
+- Pi session `fork`, `clone`, `name`, `settings`, `models`, `usage`,
+  `commands`, `stats`, `compact`, `bash`, and `export-html` commands.
 - Shell completions for bash, zsh, and fish.
 - Mock smoke and opt-in live smoke harnesses.
 - Standalone Bun executable builds for local use and release archives.
