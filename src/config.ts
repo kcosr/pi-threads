@@ -3,6 +3,10 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
 export interface PiThreadsConfig {
+  defaults: {
+    model?: string;
+    thinking?: string;
+  };
   daemon: {
     unixSocket: string;
     worker: {
@@ -31,8 +35,6 @@ export interface PiThreadsConfig {
       authToken?: string;
       authTokenEnv?: string;
       tlsCa?: string;
-      tlsCert?: string;
-      tlsKey?: string;
     }
   >;
 }
@@ -43,6 +45,7 @@ export function defaultConfigPath(): string {
 
 export function defaultConfig(): PiThreadsConfig {
   return {
+    defaults: {},
     daemon: {
       unixSocket: "/tmp/pi-threads.sock",
       worker: {
@@ -65,6 +68,8 @@ export function defaultConfig(): PiThreadsConfig {
   };
 }
 
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
 export function loadConfig(path?: string): PiThreadsConfig {
   const configPath = path ? resolve(path) : defaultConfigPath();
   if (!existsSync(configPath)) {
@@ -86,6 +91,29 @@ export function resolveEndpoint(options: {
   return options.config.servers[alias]?.endpoint ?? options.config.daemon.unixSocket;
 }
 
+export function resolveClientConfig(options: {
+  config: PiThreadsConfig;
+  connect?: string;
+  server?: string;
+  authToken?: string;
+  authTokenEnv?: string;
+  tlsCa?: string;
+}): {
+  endpoint: string;
+  authToken?: string;
+  authTokenEnv?: string;
+  tlsCa?: string;
+} {
+  const alias = options.server ?? "local";
+  const server = options.connect ? undefined : options.config.servers[alias];
+  return {
+    endpoint: options.connect ?? server?.endpoint ?? options.config.daemon.unixSocket,
+    authToken: options.authToken ?? server?.authToken,
+    authTokenEnv: options.authTokenEnv ?? server?.authTokenEnv,
+    tlsCa: options.tlsCa ?? server?.tlsCa,
+  };
+}
+
 export function serverNameCandidates(path?: string): string[] {
   return Object.keys(loadConfig(path).servers);
 }
@@ -96,6 +124,7 @@ export function ensureParentDir(path: string): string {
 
 function mergeConfig(base: PiThreadsConfig, override: Partial<PiThreadsConfig>): PiThreadsConfig {
   return {
+    defaults: { ...base.defaults, ...override.defaults },
     daemon: {
       ...base.daemon,
       ...override.daemon,
@@ -118,6 +147,12 @@ function validateConfig(config: PiThreadsConfig, source: string): PiThreadsConfi
   }
   if (config.daemon.worker.idleTtlMs < 0) {
     throw new Error(`${source}: daemon.worker.idleTtlMs must be non-negative`);
+  }
+  if (
+    config.defaults.thinking &&
+    !THINKING_LEVELS.includes(config.defaults.thinking as (typeof THINKING_LEVELS)[number])
+  ) {
+    throw new Error(`${source}: defaults.thinking must be one of ${THINKING_LEVELS.join(", ")}`);
   }
   return config;
 }

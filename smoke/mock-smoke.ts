@@ -53,6 +53,7 @@ chmodSync(bin, 0o755);
 writeFileSync(
   configPath,
   JSON.stringify({
+    defaults: { model: "mock/mock-model", thinking: "medium" },
     daemon: { unixSocket: socket, worker: { minWorkers: 0, maxWorkers: 3, idleTtlMs: 1000 } },
     servers: { local: { endpoint: `unix://${socket}` } },
   }),

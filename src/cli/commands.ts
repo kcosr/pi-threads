@@ -1,4 +1,5 @@
 import { Command, Option } from "commander";
+import { THINKING_LEVELS } from "../config.ts";
 import { VERSION } from "../version.ts";
 import { configureCompletionCommands } from "./completion.ts";
 import { CliRuntime, type GlobalOptions } from "./runtime.ts";
@@ -17,9 +18,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option("--no-wait")
     .option("--auth-token <token>")
     .option("--auth-token-env <env>")
-    .option("--tls-ca <path>")
-    .option("--tls-cert <path>")
-    .option("--tls-key <path>");
+    .option("--tls-ca <path>");
 
   configureCompletionCommands(program);
 
@@ -128,16 +127,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option("--cwd <path>", "working directory", process.cwd())
     .option("--name <name>")
     .option("--model <model>")
-    .addOption(
-      new Option("--thinking <level>").choices([
-        "off",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-      ]),
-    )
+    .addOption(new Option("--thinking <level>").choices([...THINKING_LEVELS]))
     .argument("[prompt...]")
     .action(async (promptParts: string[], options) =>
       runtime.work("thread/start", {
@@ -153,16 +143,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .command("send")
     .argument("<threadId>")
     .option("--model <model>")
-    .addOption(
-      new Option("--thinking <level>").choices([
-        "off",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-      ]),
-    )
+    .addOption(new Option("--thinking <level>").choices([...THINKING_LEVELS]))
     .argument("<prompt...>")
     .action(async (threadId, promptParts, options) =>
       runtime.work("thread/send", {
@@ -243,16 +224,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .command("set")
     .argument("<threadId>")
     .option("--model <model>")
-    .addOption(
-      new Option("--thinking <level>").choices([
-        "off",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-      ]),
-    )
+    .addOption(new Option("--thinking <level>").choices([...THINKING_LEVELS]))
     .addOption(new Option("--steering-mode <mode>").choices(["all", "one-at-a-time"]))
     .addOption(new Option("--follow-up-mode <mode>").choices(["all", "one-at-a-time"]))
     .addOption(

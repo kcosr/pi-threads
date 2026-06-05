@@ -2,7 +2,12 @@ import http from "node:http";
 import https from "node:https";
 import { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
-import { assertBearerToken, assertOriginAllowed, type AuthConfig } from "../security/auth.ts";
+import {
+  assertAuthConfiguredForBind,
+  assertBearerToken,
+  assertOriginAllowed,
+  type AuthConfig,
+} from "../security/auth.ts";
 import { assertTlsAllowedForBind, loadTlsOptions, type TlsConfig } from "../security/tls.ts";
 import type { PiThreadsService } from "../service/pi-threads-service.ts";
 import { JsonRpcConnection } from "./json-rpc-router.ts";
@@ -17,6 +22,7 @@ export async function startWebSocketServer(options: {
   onShutdown?: () => void | Promise<void>;
 }): Promise<RunningTransport> {
   assertTlsAllowedForBind(options.bind, options.tls);
+  assertAuthConfiguredForBind(options.bind, options.auth);
   const tlsOptions = loadTlsOptions(options.tls);
   const server = tlsOptions ? https.createServer(tlsOptions) : http.createServer();
   const wss = new WebSocketServer({

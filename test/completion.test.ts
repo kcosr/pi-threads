@@ -9,7 +9,9 @@ afterEach(() => {
 
 describe("CLI completion", () => {
   it("completes root commands", async () => {
-    const output = await captureStdout(() => runCli(["node", "pi-threads", "__complete", "--", "s"]));
+    const output = await captureStdout(() =>
+      runCli(["node", "pi-threads", "__complete", "--", "s"]),
+    );
 
     expect(output.split("\n")).toContain("search");
     expect(output.split("\n")).toContain("send");

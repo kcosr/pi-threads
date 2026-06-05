@@ -1,4 +1,8 @@
 {
+  "defaults": {
+    "model": "provider/modelId",
+    "thinking": "medium"
+  },
   "daemon": {
     "unixSocket": "/tmp/pi-threads.sock",
     "worker": {

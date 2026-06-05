@@ -61,10 +61,10 @@ Global flags:
 - `--auth-token TOKEN`
 - `--auth-token-env ENV`
 - `--tls-ca PATH`
-- `--tls-cert PATH`
-- `--tls-key PATH`
 
 Work-starting commands return `threadId` and daemon-local `turnId`. Default `new` and `send` behavior waits until `turn.completed`, `turn.aborted`, or `turn.failed` without printing raw daemon events; `--stream` prints filtered event progress for the accepted turn, `--json --stream` emits NDJSON events, and `--no-wait` returns after acceptance.
+
+`defaults.model` and `defaults.thinking` initialize new Pi sessions when `new` omits `--model` or `--thinking`. Existing-thread `send` inherits that thread's current Pi settings unless the command passes explicit model or thinking overrides.
 
 Read command filters:
 
@@ -97,6 +97,10 @@ Endpoint examples:
 
 ```json
 {
+  "defaults": {
+    "model": "provider/modelId",
+    "thinking": "medium"
+  },
   "daemon": {
     "unixSocket": "/tmp/pi-threads.sock",
     "worker": {
@@ -128,6 +132,9 @@ Endpoint examples:
 }
 ```
 
+When using `--server ALIAS`, the CLI inherits that alias's `authToken`,
+`authTokenEnv`, and `tlsCa` unless an explicit global flag overrides it.
+
 ## Architecture
 
 The core service owns session catalog lookup, worker scheduling, leases, event fanout, active turn state, external-writer checks, and worker adaptation. CLI rendering and JSON-RPC transports are adapters over the same service methods.
@@ -143,7 +150,7 @@ External writer detection is best-effort. The daemon samples session file size, 
 - Unix socket JSON-RPC JSONL is the default local transport.
 - stdio JSON-RPC JSONL is available via `pi-threads daemon start --stdio` for embedding.
 - WebSocket JSON-RPC is opt-in through config.
-- Non-loopback TCP requires TLS cert/key.
+- Non-loopback TCP requires TLS cert/key and bearer token auth.
 - TCP/WebSocket auth uses static bearer tokens from config or env.
 - WebSocket Origin validation is supported through `allowedOrigins`.
 - Cookie or ambient browser auth is intentionally not used.

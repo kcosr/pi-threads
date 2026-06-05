@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { DaemonClient } from "../client/daemon-client.ts";
-import { loadConfig, resolveEndpoint } from "../config.ts";
+import { loadConfig, resolveClientConfig } from "../config.ts";
 import { startDaemon } from "../daemon.ts";
 import { printJson, printNdjson, renderEvent, renderHuman, renderThreadRead } from "./render.ts";
 
@@ -14,8 +14,6 @@ export interface GlobalOptions {
   authToken?: string;
   authTokenEnv?: string;
   tlsCa?: string;
-  tlsCert?: string;
-  tlsKey?: string;
 }
 
 export class CliRuntime {
@@ -146,10 +144,14 @@ export class CliRuntime {
     const options = this.readOptions();
     const config = this.config();
     return new DaemonClient({
-      endpoint: resolveEndpoint({ config, connect: options.connect, server: options.server }),
-      authToken: options.authToken,
-      authTokenEnv: options.authTokenEnv,
-      tlsCa: options.tlsCa,
+      ...resolveClientConfig({
+        config,
+        connect: options.connect,
+        server: options.server,
+        authToken: options.authToken,
+        authTokenEnv: options.authTokenEnv,
+        tlsCa: options.tlsCa,
+      }),
     });
   }
 }

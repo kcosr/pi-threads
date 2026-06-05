@@ -54,5 +54,6 @@ export async function startDaemon(
       }),
     );
   }
+  service.setTransports(transports.map((transport) => transport.name));
   return { service, transports, stop };
 }

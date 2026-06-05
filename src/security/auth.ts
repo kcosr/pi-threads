@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { DaemonError } from "../errors.ts";
+import { isLoopbackHost } from "./tls.ts";
 
 export interface AuthConfig {
   token?: string;
@@ -28,6 +29,17 @@ export function assertBearerToken(config: AuthConfig, authorizationHeader?: stri
   }
   if (!timingSafeEqualText(expected, actual)) {
     throw new DaemonError("forbidden", "Bearer token rejected");
+  }
+}
+
+export function assertAuthConfiguredForBind(host: string, config: AuthConfig): void {
+  if (isLoopbackHost(host)) {
+    return;
+  }
+  if (!resolveToken(config)) {
+    throw new DaemonError("forbidden", "Non-loopback TCP requires bearer token auth", {
+      bind: host,
+    });
   }
 }
 

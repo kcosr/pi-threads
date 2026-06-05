@@ -8,8 +8,8 @@ Environment flags:
 
 - `PI_THREADS_ENDPOINT`: endpoint to target, default `unix:///tmp/pi-threads-live.sock`.
 - `PI_THREADS_TRANSPORT=stdio`: reserved for parent-owned daemon smoke.
-- `PI_THREADS_AUTH_TOKEN_ENV`: token env var for TCP/WebSocket smoke.
-- `PI_THREADS_TLS_CA`: CA path for `wss://` smoke.
+- `PI_THREADS_AUTH_TOKEN_ENV`: reserved for future TCP/WebSocket smoke.
+- `PI_THREADS_TLS_CA`: reserved for future `wss://` smoke.
 - `PI_THREADS_MODEL`: optional model selector. Use `provider/modelId` for an exact Pi RPC `set_model`, or a configured Pi model id that can be resolved from `get_available_models`.
 - `PI_THREADS_THINKING`: optional thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`.
 

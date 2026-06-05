@@ -36,14 +36,17 @@ export class PiThreadsService {
   readonly events = new EventBus();
   readonly catalog: PiSessionCatalog;
   readonly workers: WorkerPool;
+  private readonly defaults: PiThreadsConfig["defaults"];
   private readonly startedAt = Date.now();
   private readonly activeTurns = new Map<string, { turnId: string; workerId: string }>();
+  private transportNames: string[] = [];
   private shuttingDown = false;
 
   constructor(
     config: PiThreadsConfig,
     options?: { catalog?: PiSessionCatalog; workers?: WorkerPool },
   ) {
+    this.defaults = config.defaults;
     this.catalog = options?.catalog ?? new PiSessionCatalog();
     this.workers =
       options?.workers ??
@@ -58,13 +61,17 @@ export class PiThreadsService {
     this.events.subscribe({}, (event) => void this.handleDaemonEvent(event));
   }
 
-  serverStatus(transports: string[] = []): ServerStatus {
+  setTransports(transports: string[]): void {
+    this.transportNames = transports;
+  }
+
+  serverStatus(): ServerStatus {
     return {
       version: VERSION,
       piCompatibility: PI_COMPATIBILITY,
       uptimeMs: Date.now() - this.startedAt,
       workers: this.workers.list(),
-      transports,
+      transports: this.transportNames,
     };
   }
 
@@ -166,7 +173,7 @@ export class PiThreadsService {
     if (params.name) {
       await worker.command({ type: "set_session_name", name: params.name }, 20_000);
     }
-    await this.applySettings(worker, params);
+    await this.applySettings(worker, withDefaults(params, this.defaults));
     state = await worker.getState();
     const threadId = String(state.sessionId);
     worker.threadId = threadId;
@@ -690,6 +697,17 @@ function preview(value: string | undefined): string | undefined {
     return undefined;
   }
   return value.length > 120 ? `${value.slice(0, 117)}...` : value;
+}
+
+function withDefaults<T extends { model?: string; thinking?: string }>(
+  params: T,
+  defaults: PiThreadsConfig["defaults"],
+): T {
+  return {
+    ...params,
+    model: params.model ?? defaults.model,
+    thinking: params.thinking ?? defaults.thinking,
+  };
 }
 
 function limitEntries(

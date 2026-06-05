@@ -1,5 +1,6 @@
 import net from "node:net";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import { DaemonError } from "../errors.ts";
 import type { DaemonEvent } from "../protocol/events.ts";
@@ -112,6 +113,7 @@ async function connectWebSocket(options: DaemonClientOptions): Promise<ClientTra
     options.authToken ?? (options.authTokenEnv ? process.env[options.authTokenEnv] : undefined);
   const socket = new WebSocket(options.endpoint, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    ca: options.tlsCa ? readFileSync(options.tlsCa) : undefined,
   });
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve);
