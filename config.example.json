@@ -1,0 +1,22 @@
+{
+  "daemon": {
+    "unixSocket": "/tmp/pi-threads.sock",
+    "worker": {
+      "minWorkers": 0,
+      "maxWorkers": 4,
+      "idleTtlMs": 300000
+    },
+    "tcp": {
+      "enabled": false,
+      "bind": "127.0.0.1",
+      "port": 8765,
+      "authTokenEnv": "PI_THREADS_AUTH_TOKEN",
+      "allowedOrigins": []
+    }
+  },
+  "servers": {
+    "local": {
+      "endpoint": "unix:///tmp/pi-threads.sock"
+    }
+  }
+}

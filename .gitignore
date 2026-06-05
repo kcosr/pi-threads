@@ -1,0 +1,11 @@
+node_modules/
+dist/
+bin/
+coverage/
+*.log
+.env
+.pi-threads/
+smoke/tmp/
+tmp/
+local.config.json
+bun.lockb
