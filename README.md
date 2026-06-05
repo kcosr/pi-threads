@@ -26,7 +26,8 @@ Use another shell for client commands:
 
 ```bash
 bun run src/index.ts servers ping
-bun run src/index.ts list --cwd "$PWD"
+bun run src/index.ts list --cwd "$PWD" --since 24h --sort updated --limit 20
+bun run src/index.ts search "release process" --since 7d --limit 10
 bun run src/index.ts new --cwd "$PWD" --name demo "Summarize this project"
 bun run src/index.ts status THREAD_ID
 bun run src/index.ts messages THREAD_ID --last 10
@@ -63,7 +64,24 @@ Global flags:
 - `--tls-cert PATH`
 - `--tls-key PATH`
 
-Work-starting commands return `threadId` and daemon-local `turnId`. Default `new` and `send` behavior streams until `turn.completed`, `turn.aborted`, or `turn.failed`; `--no-wait` returns after acceptance. `--json --stream` emits NDJSON events.
+Work-starting commands return `threadId` and daemon-local `turnId`. Default `new` and `send` behavior waits until `turn.completed`, `turn.aborted`, or `turn.failed` without printing raw daemon events; `--stream` prints filtered event progress for the accepted turn, `--json --stream` emits NDJSON events, and `--no-wait` returns after acceptance.
+
+Read command filters:
+
+- `list` and `search` support `--limit`, `--cursor`, `--since`, `--cwd`, `--sort updated|created`, `--asc`, and `--desc`.
+- `show` supports `--last`, `--asc`, `--desc`, and `--items summary|full|none`.
+- `messages` supports `--last`, `--since`, and `--role user|assistant|tool|bash|custom`.
+- `--since` accepts epoch seconds, ISO timestamps, or relative windows such as `5m`, `24h`, and `7d`.
+- `--archived` is rejected because `pi-threads` does not maintain a daemon-owned archive store.
+
+Shell completions:
+
+```bash
+bun run src/index.ts completion
+bun run src/index.ts completion script bash
+```
+
+See `docs/config-option-implementation-audit.md` for the current implementation status of configurable and documented options. See `docs/cli-parity-audit.md` for command-shape parity with `codex-threads` and `t3code-threads`.
 
 ## Config
 
@@ -116,7 +134,7 @@ The core service owns session catalog lookup, worker scheduling, leases, event f
 
 Workers are cwd-aware. A new thread for cwd `X` uses an idle worker already rooted at `X` or spawns a new worker in `X`. Existing sessions can be loaded into idle workers with internal `switch_session`. The daemon enforces one in-memory writer lease per Pi session id.
 
-`daemon.worker.minWorkers` prewarms and maintains that many idle workers rooted at the daemon process cwd. The default is `0`; set it to `1` for a warm local worker. `daemon.worker.idleTtlMs` reaps non-running workers after the configured idle time, trimming the pool down to `minWorkers`. The default is five minutes.
+`daemon.worker.minWorkers` prewarms and maintains that many total workers rooted at the daemon process cwd. The default is `0`; set it to `1` for a warm local worker. `daemon.worker.idleTtlMs` reaps non-running workers after the configured idle time, trimming the pool down to `minWorkers`. The default is five minutes.
 
 External writer detection is best-effort. The daemon samples session file size, mtime, and last-entry identity before write-producing commands and refuses with `externalWriterDetected` if the baseline changed outside daemon-owned execution. Direct Pi use still has a TOCTOU window because Pi does not share a lock with this daemon.
 

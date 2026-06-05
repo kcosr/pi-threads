@@ -1,6 +1,6 @@
 # pi-threads Smoke
 
-`smoke:mock` is deterministic and uses a generated fake `pi` executable. It starts a disposable daemon over a Unix socket and exercises representative CLI commands without model calls.
+`smoke:mock` is deterministic and uses a generated fake `pi` executable. It starts a disposable daemon over a Unix socket and exercises representative CLI commands without model calls, including a prompted `new` check that default output does not leak raw daemon event names.
 
 `smoke:live` is opt-in and targets real `pi --mode rpc` workers with real model turns. It uses disposable directories and validates daemon startup, model discovery, `new`, `send`, `status`, `messages`, `steer`, `abort`, cwd-specific worker assignment, and concurrent multi-worker execution.
 
@@ -12,7 +12,8 @@ Environment flags:
 - `PI_THREADS_TLS_CA`: CA path for `wss://` smoke.
 - `PI_THREADS_MODEL`: optional model selector. Use `provider/modelId` for an exact Pi RPC `set_model`, or a configured Pi model id that can be resolved from `get_available_models`.
 - `PI_THREADS_THINKING`: optional thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`.
-- `RUN_PI_ABORT=1`, `RUN_PI_BASH=1`, `RUN_PI_FORK=1`, `RUN_PI_EXTERNAL_WRITER=1`: enable scoped destructive or tooling paths in disposable dirs.
+
+Current live smoke always runs real model turns and includes abort coverage. `RUN_PI_BASH=1`, `RUN_PI_FORK=1`, and `RUN_PI_EXTERNAL_WRITER=1` are design-era optional paths that are not wired into the current script; see `docs/config-option-implementation-audit.md`.
 
 Real live smoke may spend provider tokens. Use `smoke:mock` for no-cost fake-worker coverage.
 

@@ -11,11 +11,26 @@ import type {
   ServerStatus,
   SubscriptionRequest,
   ThreadReadResult,
+  ThreadSummary,
 } from "../protocol/types.ts";
 import { PI_COMPATIBILITY, VERSION } from "../version.ts";
 import { PiSessionCatalog } from "../session/catalog.ts";
 import { WorkerPool, type PooledWorker } from "../worker/worker-pool.ts";
 import { EventBus, type EventListener } from "./event-bus.ts";
+
+interface ThreadListParams {
+  cwd?: string;
+  limit?: number;
+  cursor?: string;
+  since?: string;
+  archived?: boolean;
+  sort?: "updated" | "created";
+  asc?: boolean;
+}
+
+interface ThreadSearchParams extends ThreadListParams {
+  query: string;
+}
 
 export class PiThreadsService {
   readonly events = new EventBus();
@@ -72,38 +87,45 @@ export class PiThreadsService {
     return { worker: this.workers.list().find((item) => item.workerId === worker.workerId) };
   }
 
-  async threadList(params: { cwd?: string; limit?: number; cursor?: string } = {}) {
-    const threads = await this.catalog.list(params.cwd);
-    for (const worker of this.workers.list()) {
-      if (!worker.threadId || (params.cwd && worker.cwd !== resolve(params.cwd))) {
-        continue;
-      }
-      if (threads.some((thread) => thread.threadId === worker.threadId)) {
-        continue;
-      }
-      threads.push({
-        threadId: worker.threadId,
-        cwd: worker.cwd,
-        messageCount: 0,
-        status: worker.state === "running" ? "running" : "idle",
-      });
-    }
-    const offset = params.cursor ? Number(params.cursor) : 0;
-    const limit = params.limit ?? 50;
-    return {
-      threads: threads.slice(offset, offset + limit),
-      cursor: offset + limit < threads.length ? String(offset + limit) : undefined,
-    };
+  async threadList(params: ThreadListParams = {}) {
+    return pageThreads(
+      filterThreads(
+        overlayWorkerThreadStatuses(
+          await this.catalog.list(params.cwd),
+          this.workers.list(),
+          this.activeTurns,
+          params.cwd,
+        ),
+        params,
+      ),
+      params,
+    );
   }
 
-  async threadSearch(params: { query: string; cwd?: string; limit?: number }) {
-    return { threads: await this.catalog.search(params.query, params.cwd, params.limit) };
+  async threadSearch(params: ThreadSearchParams) {
+    return pageThreads(
+      filterThreads(
+        overlayWorkerThreadStatuses(
+          await this.catalog.search(params.query, params.cwd),
+          this.workers.list(),
+          this.activeTurns,
+          params.cwd,
+        ),
+        params,
+      ),
+      params,
+    );
   }
 
-  async threadRead(params: { threadId: string }): Promise<ThreadReadResult> {
+  async threadRead(params: {
+    threadId: string;
+    last?: number;
+    asc?: boolean;
+  }): Promise<ThreadReadResult> {
     const result = await this.catalog.read(params.threadId);
     return {
       ...result,
+      entries: limitEntries(result.entries, params.last, params.asc),
       thread: {
         ...result.thread,
         status: this.activeTurns.has(result.thread.threadId) ? "running" : "idle",
@@ -111,7 +133,7 @@ export class PiThreadsService {
     };
   }
 
-  async threadMessages(params: { threadId: string; last?: number; role?: string }) {
+  async threadMessages(params: { threadId: string; last?: number; role?: string; since?: string }) {
     const worker = this.workers.findByThread(params.threadId);
     if (worker) {
       const response = await worker.command({ type: "get_messages" }, 20_000);
@@ -119,10 +141,14 @@ export class PiThreadsService {
         []) as unknown[];
       return {
         threadId: params.threadId,
-        messages: params.last ? messages.slice(-params.last) : messages,
+        messages: filterMessages(messages, params),
       };
     }
-    return this.catalog.messages(params.threadId, { last: params.last, role: params.role });
+    const result = await this.catalog.messages(params.threadId);
+    return {
+      threadId: result.threadId,
+      messages: filterMessages(result.messages, params),
+    };
   }
 
   async threadStart(params: {
@@ -436,11 +462,23 @@ export class PiThreadsService {
     return { threadId: params.threadId, requestId: params.requestId, status: "responded" };
   }
 
-  async modelsList() {
+  async modelsList(params: { provider?: string } = {}) {
     const worker = await this.workers.acquireForNew(process.cwd());
     const response = await worker.command({ type: "get_available_models" }, 30_000);
     this.workers.release(worker);
-    return response.data ?? { models: [] };
+    const data = (response.data ?? { models: [] }) as Record<string, unknown>;
+    if (!params.provider || !Array.isArray(data.models)) {
+      return data;
+    }
+    return {
+      ...data,
+      models: data.models.filter(
+        (model) =>
+          model &&
+          typeof model === "object" &&
+          (model as Record<string, unknown>).provider === params.provider,
+      ),
+    };
   }
 
   async usageRead(params: { threadId?: string } = {}) {
@@ -473,9 +511,11 @@ export class PiThreadsService {
       case "thread/search":
         return this.threadSearch(params as { query: string });
       case "thread/read":
-        return this.threadRead(params as { threadId: string });
+        return this.threadRead(params as { threadId: string; last?: number; asc?: boolean });
       case "thread/messages":
-        return this.threadMessages(params as { threadId: string });
+        return this.threadMessages(
+          params as { threadId: string; last?: number; role?: string; since?: string },
+        );
       case "thread/start":
         return this.threadStart(params as Parameters<PiThreadsService["threadStart"]>[0]);
       case "thread/send":
@@ -517,7 +557,7 @@ export class PiThreadsService {
           params as { threadId: string; requestId: string; response: unknown },
         );
       case "models/list":
-        return this.modelsList();
+        return this.modelsList(params as { provider?: string });
       case "usage/read":
         return this.usageRead(params as { threadId?: string });
       case "subscribe/thread":
@@ -650,4 +690,184 @@ function preview(value: string | undefined): string | undefined {
     return undefined;
   }
   return value.length > 120 ? `${value.slice(0, 117)}...` : value;
+}
+
+function limitEntries(
+  entries: unknown[] | undefined,
+  last: number | undefined,
+  asc: boolean | undefined,
+): unknown[] | undefined {
+  if (!entries) {
+    return entries;
+  }
+  let messages = entries.filter((entry) => isMessageEntry(entry));
+  if (asc === false) {
+    messages = [...messages].reverse();
+  }
+  if (last !== undefined && last <= 0) {
+    return [];
+  }
+  if (last !== undefined) {
+    messages = asc === false ? messages.slice(0, last).reverse() : messages.slice(-last);
+  }
+  return messages;
+}
+
+function filterMessages(
+  messages: unknown[],
+  options: { last?: number; role?: string; since?: string },
+): unknown[] {
+  const since = parseSince(options.since);
+  let filtered = messages;
+  if (options.role) {
+    filtered = filtered.filter((message) => messageRole(message) === options.role);
+  }
+  if (since !== undefined) {
+    filtered = filtered.filter((message) => {
+      const timestamp = messageTimestamp(message);
+      return timestamp !== undefined && timestamp >= since;
+    });
+  }
+  if (options.last !== undefined) {
+    filtered = options.last <= 0 ? [] : filtered.slice(-options.last);
+  }
+  return filtered;
+}
+
+function isMessageEntry(entry: unknown): boolean {
+  return Boolean(
+    entry && typeof entry === "object" && (entry as Record<string, unknown>).type === "message",
+  );
+}
+
+function messageRole(message: unknown): unknown {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  return (message as Record<string, unknown>).role;
+}
+
+function messageTimestamp(message: unknown): number | undefined {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  const record = message as Record<string, unknown>;
+  const raw = record.createdAt ?? record.timestamp;
+  if (typeof raw === "number") {
+    return raw;
+  }
+  if (typeof raw === "string") {
+    const parsed = Date.parse(raw);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return undefined;
+}
+
+function parseSince(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1_000;
+  }
+  const relative = trimmed.match(/^(\d+)(ms|s|m|h|d|w)$/i);
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = relative[2]?.toLowerCase();
+    const multiplier =
+      unit === "ms"
+        ? 1
+        : unit === "s"
+          ? 1_000
+          : unit === "m"
+            ? 60_000
+            : unit === "h"
+              ? 3_600_000
+              : unit === "d"
+                ? 86_400_000
+                : 604_800_000;
+    return Date.now() - amount * multiplier;
+  }
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    throw new DaemonError("invalidParams", "Invalid --since value", { since: value });
+  }
+  return parsed;
+}
+
+function filterThreads(threads: ThreadSummary[], options: ThreadListParams): ThreadSummary[] {
+  if (options.archived) {
+    throw new DaemonError("invalidParams", "Pi session archive filtering is not supported", {
+      archived: true,
+    });
+  }
+  const since = parseSince(options.since);
+  const filtered =
+    since === undefined ? threads : threads.filter((thread) => threadTime(thread) >= since);
+  const sort = options.sort ?? "updated";
+  const ascending = options.asc === true;
+  return [...filtered].sort((left, right) => {
+    const leftValue = sort === "created" ? threadCreatedTime(left) : threadUpdatedTime(left);
+    const rightValue = sort === "created" ? threadCreatedTime(right) : threadUpdatedTime(right);
+    return ascending ? leftValue - rightValue : rightValue - leftValue;
+  });
+}
+
+function pageThreads(threads: ThreadSummary[], options: ThreadListParams) {
+  const offset = options.cursor ? Number(options.cursor) : 0;
+  const limit = options.limit ?? 50;
+  return {
+    threads: threads.slice(offset, offset + limit),
+    cursor: offset + limit < threads.length ? String(offset + limit) : undefined,
+  };
+}
+
+function threadTime(thread: ThreadSummary): number {
+  return threadUpdatedTime(thread);
+}
+
+function threadUpdatedTime(thread: ThreadSummary): number {
+  return parseThreadDate(thread.modified ?? thread.created);
+}
+
+function threadCreatedTime(thread: ThreadSummary): number {
+  return parseThreadDate(thread.created ?? thread.modified);
+}
+
+function parseThreadDate(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function overlayWorkerThreadStatuses(
+  catalogThreads: ThreadSummary[],
+  workers: ReturnType<WorkerPool["list"]>,
+  activeTurns: Map<string, { turnId: string; workerId: string }>,
+  cwd?: string,
+): ThreadSummary[] {
+  const resolvedCwd = cwd ? resolve(cwd) : undefined;
+  const threads = catalogThreads.map((thread) => ({ ...thread }));
+  for (const worker of workers) {
+    if (!worker.threadId || (resolvedCwd && worker.cwd !== resolvedCwd)) {
+      continue;
+    }
+    const status =
+      worker.state === "running" || activeTurns.has(worker.threadId) ? "running" : "idle";
+    const existing = threads.find((thread) => thread.threadId === worker.threadId);
+    if (existing) {
+      existing.status = status;
+      continue;
+    }
+    threads.push({
+      threadId: worker.threadId,
+      cwd: worker.cwd,
+      messageCount: 0,
+      status,
+    });
+  }
+  return threads;
 }

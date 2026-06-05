@@ -1,27 +1,11 @@
-import { writeFileSync } from "node:fs";
-import { Command } from "commander";
-import { loadConfig, resolveEndpoint } from "../config.ts";
-import { DaemonClient } from "../client/daemon-client.ts";
-import { startDaemon } from "../daemon.ts";
+import { Command, Option } from "commander";
 import { VERSION } from "../version.ts";
-import { printJson, renderEvent, renderHuman } from "./render.ts";
-
-interface GlobalOptions {
-  config?: string;
-  connect?: string;
-  server?: string;
-  json?: boolean;
-  stream?: boolean;
-  wait?: boolean;
-  authToken?: string;
-  authTokenEnv?: string;
-  tlsCa?: string;
-  tlsCert?: string;
-  tlsKey?: string;
-}
+import { configureCompletionCommands } from "./completion.ts";
+import { CliRuntime, type GlobalOptions } from "./runtime.ts";
 
 export async function runCli(argv = process.argv): Promise<void> {
   const program = new Command();
+  const runtime = new CliRuntime(() => program.opts<GlobalOptions>());
   program
     .name("pi-threads")
     .version(VERSION)
@@ -37,52 +21,46 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option("--tls-cert <path>")
     .option("--tls-key <path>");
 
+  configureCompletionCommands(program);
+
   const daemon = program.command("daemon");
   daemon
     .command("start")
     .option("--stdio")
-    .action(async (options) => {
-      const config = loadConfig(program.opts<GlobalOptions>().config);
-      const runtime = await startDaemon(config, { stdio: options.stdio });
-      if (!options.stdio) {
-        for (const transport of runtime.transports) {
-          process.stderr.write(`listening ${transport.name}\n`);
-        }
-      }
-      const stop = async () => {
-        await runtime.stop();
-        process.exit(0);
-      };
-      process.once("SIGINT", () => void stop());
-      process.once("SIGTERM", () => void stop());
-      await new Promise(() => undefined);
-    });
-  daemon.command("status").action(async () => render(await request(program, "server/status")));
-  daemon.command("stop").action(async () => render(await request(program, "server/shutdown")));
+    .action(async (options: { stdio?: boolean }) => runtime.daemonStart(options));
+  daemon
+    .command("status")
+    .action(async () => runtime.render(await runtime.request("server/status")));
+  daemon
+    .command("stop")
+    .action(async () => runtime.render(await runtime.request("server/shutdown")));
 
-  program
-    .command("servers")
-    .argument("[ping]")
-    .action(async (subcommand) => {
-      if (subcommand === "ping") {
-        render(await request(program, "server/status"));
-        return;
-      }
-      const config = loadConfig(program.opts<GlobalOptions>().config);
-      render(config.servers);
-    });
+  const servers = program.command("servers");
+  servers.action(() => runtime.render(runtime.servers()));
+  servers
+    .command("ping")
+    .action(async () => runtime.render(await runtime.request("server/status")));
 
   program
     .command("list")
     .option("--cwd <path>")
     .option("--limit <n>")
     .option("--cursor <cursor>")
+    .option("--since <value>")
+    .option("--archived")
+    .addOption(new Option("--sort <key>").choices(["updated", "created"]))
+    .option("--asc")
+    .option("--desc")
     .action(async (options) =>
-      render(
-        await request(program, "thread/list", {
+      runtime.render(
+        await runtime.request("thread/list", {
           cwd: options.cwd,
           limit: numberOpt(options.limit),
           cursor: options.cursor,
+          since: options.since,
+          archived: options.archived,
+          sort: options.sort,
+          asc: sortAscending(options),
         }),
       ),
     );
@@ -92,12 +70,23 @@ export async function runCli(argv = process.argv): Promise<void> {
     .argument("<query>")
     .option("--cwd <path>")
     .option("--limit <n>")
+    .option("--cursor <cursor>")
+    .option("--since <value>")
+    .option("--archived")
+    .addOption(new Option("--sort <key>").choices(["updated", "created"]))
+    .option("--asc")
+    .option("--desc")
     .action(async (query, options) =>
-      render(
-        await request(program, "thread/search", {
+      runtime.render(
+        await runtime.request("thread/search", {
           query,
           cwd: options.cwd,
           limit: numberOpt(options.limit),
+          cursor: options.cursor,
+          since: options.since,
+          archived: options.archived,
+          sort: options.sort,
+          asc: sortAscending(options),
         }),
       ),
     );
@@ -106,20 +95,29 @@ export async function runCli(argv = process.argv): Promise<void> {
     .command("show")
     .argument("<threadId>")
     .option("--last <n>")
-    .option("--items <mode>")
-    .action(async (threadId) => render(await request(program, "thread/read", { threadId })));
+    .option("--asc")
+    .option("--desc")
+    .addOption(new Option("--items <mode>").choices(["summary", "full", "none"]))
+    .action(async (threadId, options) =>
+      runtime.showThread(threadId, {
+        last: numberOpt(options.last),
+        asc: sortAscending(options),
+        items: options.items,
+      }),
+    );
 
   program
     .command("messages")
     .argument("<threadId>")
     .option("--last <n>")
     .option("--since <value>")
-    .option("--role <role>")
+    .addOption(new Option("--role <role>").choices(["user", "assistant", "tool", "bash", "custom"]))
     .action(async (threadId, options) =>
-      render(
-        await request(program, "thread/messages", {
+      runtime.render(
+        await runtime.request("thread/messages", {
           threadId,
           last: numberOpt(options.last),
+          since: options.since,
           role: options.role,
         }),
       ),
@@ -130,10 +128,19 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option("--cwd <path>", "working directory", process.cwd())
     .option("--name <name>")
     .option("--model <model>")
-    .option("--thinking <level>")
+    .addOption(
+      new Option("--thinking <level>").choices([
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+      ]),
+    )
     .argument("[prompt...]")
     .action(async (promptParts: string[], options) =>
-      work(program, "thread/start", {
+      runtime.work("thread/start", {
         cwd: options.cwd,
         name: options.name,
         model: options.model,
@@ -146,10 +153,19 @@ export async function runCli(argv = process.argv): Promise<void> {
     .command("send")
     .argument("<threadId>")
     .option("--model <model>")
-    .option("--thinking <level>")
+    .addOption(
+      new Option("--thinking <level>").choices([
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+      ]),
+    )
     .argument("<prompt...>")
     .action(async (threadId, promptParts, options) =>
-      work(program, "thread/send", {
+      runtime.work("thread/send", {
         threadId,
         model: options.model,
         thinking: options.thinking,
@@ -162,33 +178,39 @@ export async function runCli(argv = process.argv): Promise<void> {
     .argument("<threadId>")
     .argument("<prompt...>")
     .action(async (threadId, promptParts) => {
-      render(await request(program, "thread/steer", { threadId, prompt: promptParts.join(" ") }));
+      runtime.render(
+        await runtime.request("thread/steer", { threadId, prompt: promptParts.join(" ") }),
+      );
     });
   program
     .command("follow-up")
     .argument("<threadId>")
     .argument("<prompt...>")
     .action(async (threadId, promptParts) => {
-      render(
-        await request(program, "thread/follow_up", { threadId, prompt: promptParts.join(" ") }),
+      runtime.render(
+        await runtime.request("thread/follow_up", { threadId, prompt: promptParts.join(" ") }),
       );
     });
   program
     .command("abort")
     .argument("<threadId>")
-    .action(async (threadId) => render(await request(program, "thread/abort", { threadId })));
+    .action(async (threadId) =>
+      runtime.render(await runtime.request("thread/abort", { threadId })),
+    );
   program
     .command("status")
     .argument("[threadId]")
-    .action(async (threadId) => render(await request(program, "thread/status", { threadId })));
+    .action(async (threadId) =>
+      runtime.render(await runtime.request("thread/status", { threadId })),
+    );
   program
     .command("fork")
     .argument("<threadId>")
     .requiredOption("--entry-id <entryId>")
     .option("--name <name>")
     .action(async (threadId, options) =>
-      render(
-        await request(program, "thread/fork", {
+      runtime.render(
+        await runtime.request("thread/fork", {
           threadId,
           entryId: options.entryId,
           name: options.name,
@@ -200,14 +222,14 @@ export async function runCli(argv = process.argv): Promise<void> {
     .argument("<threadId>")
     .option("--name <name>")
     .action(async (threadId, options) => {
-      render(await request(program, "thread/clone", { threadId, name: options.name }));
+      runtime.render(await runtime.request("thread/clone", { threadId, name: options.name }));
     });
   program
     .command("name")
     .argument("<threadId>")
     .argument("<name>")
     .action(async (threadId, name) => {
-      render(await request(program, "thread/name/set", { threadId, name }));
+      runtime.render(await runtime.request("thread/name/set", { threadId, name }));
     });
 
   const settings = program.command("settings");
@@ -215,20 +237,31 @@ export async function runCli(argv = process.argv): Promise<void> {
     .command("show")
     .argument("<threadId>")
     .action(async (threadId) =>
-      render(await request(program, "thread/settings/read", { threadId })),
+      runtime.render(await runtime.request("thread/settings/read", { threadId })),
     );
   settings
     .command("set")
     .argument("<threadId>")
     .option("--model <model>")
-    .option("--thinking <level>")
-    .option("--steering-mode <mode>")
-    .option("--follow-up-mode <mode>")
-    .option("--auto-compaction <state>")
-    .option("--auto-retry <state>")
+    .addOption(
+      new Option("--thinking <level>").choices([
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+      ]),
+    )
+    .addOption(new Option("--steering-mode <mode>").choices(["all", "one-at-a-time"]))
+    .addOption(new Option("--follow-up-mode <mode>").choices(["all", "one-at-a-time"]))
+    .addOption(
+      new Option("--auto-compaction <state>").choices(["on", "off", "true", "false", "1", "0"]),
+    )
+    .addOption(new Option("--auto-retry <state>").choices(["on", "off", "true", "false", "1", "0"]))
     .action(async (threadId, options) =>
-      render(
-        await request(program, "thread/settings/update", {
+      runtime.render(
+        await runtime.request("thread/settings/update", {
           threadId,
           model: options.model,
           thinking: options.thinking,
@@ -240,30 +273,35 @@ export async function runCli(argv = process.argv): Promise<void> {
       ),
     );
 
-  program.command("models").action(async () => render(await request(program, "models/list")));
+  program
+    .command("models")
+    .option("--provider <provider>")
+    .action(async (options) =>
+      runtime.render(await runtime.request("models/list", { provider: options.provider })),
+    );
   program
     .command("usage")
     .argument("[threadId]")
-    .action(async (threadId) => render(await request(program, "usage/read", { threadId })));
+    .action(async (threadId) => runtime.render(await runtime.request("usage/read", { threadId })));
   program
     .command("commands")
     .argument("<threadId>")
     .action(async (threadId) =>
-      render(await request(program, "thread/commands/list", { threadId })),
+      runtime.render(await runtime.request("thread/commands/list", { threadId })),
     );
   program
     .command("stats")
     .argument("<threadId>")
     .action(async (threadId) =>
-      render(await request(program, "thread/context/stats", { threadId })),
+      runtime.render(await runtime.request("thread/context/stats", { threadId })),
     );
   program
     .command("compact")
     .argument("<threadId>")
     .argument("[prompt...]")
     .action(async (threadId, promptParts) => {
-      render(
-        await request(program, "thread/compact", {
+      runtime.render(
+        await runtime.request("thread/compact", {
           threadId,
           prompt: promptParts.join(" ") || undefined,
         }),
@@ -274,99 +312,17 @@ export async function runCli(argv = process.argv): Promise<void> {
     .argument("<threadId>")
     .argument("<command...>")
     .action(async (threadId, commandParts) => {
-      render(
-        await request(program, "thread/bash/run", { threadId, command: commandParts.join(" ") }),
+      runtime.render(
+        await runtime.request("thread/bash/run", { threadId, command: commandParts.join(" ") }),
       );
     });
   program
     .command("export-html")
     .argument("<threadId>")
     .argument("[output]")
-    .action(async (threadId, output) => {
-      const result = (await request(program, "thread/export/html", { threadId })) as {
-        html: string;
-      };
-      if (output) {
-        writeFileSync(output, result.html);
-        render({ threadId, output });
-      } else if (program.opts<GlobalOptions>().json) {
-        printJson(result);
-      } else {
-        process.stdout.write(result.html);
-      }
-    });
+    .action(async (threadId, output) => runtime.exportHtml(threadId, output));
 
   await program.parseAsync(argv);
-}
-
-async function request(
-  program: Command,
-  method: string,
-  params?: Record<string, unknown>,
-): Promise<unknown> {
-  const options = program.opts<GlobalOptions>();
-  const config = loadConfig(options.config);
-  const client = new DaemonClient({
-    endpoint: resolveEndpoint({ config, connect: options.connect, server: options.server }),
-    authToken: options.authToken,
-    authTokenEnv: options.authTokenEnv,
-    tlsCa: options.tlsCa,
-  });
-  try {
-    return await client.request(method, params);
-  } finally {
-    await client.close();
-  }
-}
-
-async function work(
-  program: Command,
-  method: string,
-  params: Record<string, unknown>,
-): Promise<void> {
-  const options = program.opts<GlobalOptions>();
-  const config = loadConfig(options.config);
-  const client = new DaemonClient({
-    endpoint: resolveEndpoint({ config, connect: options.connect, server: options.server }),
-    authToken: options.authToken,
-    authTokenEnv: options.authTokenEnv,
-    tlsCa: options.tlsCa,
-  });
-  const noWait = options.wait === false;
-  const shouldStream = options.stream || (!noWait && !params.promptless);
-  let terminal = false;
-  if (shouldStream) {
-    await client.connect();
-    client.on("event", (event) => {
-      renderEvent(event, Boolean(options.json));
-      if (
-        event.type === "turn.completed" ||
-        event.type === "turn.aborted" ||
-        event.type === "turn.failed"
-      ) {
-        terminal = true;
-      }
-    });
-    await client.request("subscribe/all", {});
-  }
-  const accepted = await client.request(method, params);
-  render(accepted);
-  if (noWait || !shouldStream) {
-    await client.close();
-    return;
-  }
-  while (!terminal) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  await client.close();
-}
-
-function render(value: unknown): void {
-  if (process.argv.includes("--json")) {
-    printJson(value);
-  } else {
-    renderHuman(value);
-  }
 }
 
 function numberOpt(value: string | undefined): number | undefined {
@@ -378,4 +334,14 @@ function boolOpt(value: string | undefined): boolean | undefined {
     return undefined;
   }
   return value === "on" || value === "true" || value === "1";
+}
+
+function sortAscending(options: { asc?: boolean; desc?: boolean }): boolean | undefined {
+  if (options.asc) {
+    return true;
+  }
+  if (options.desc) {
+    return false;
+  }
+  return undefined;
 }

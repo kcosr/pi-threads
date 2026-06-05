@@ -53,7 +53,7 @@ chmodSync(bin, 0o755);
 writeFileSync(
   configPath,
   JSON.stringify({
-    daemon: { unixSocket: socket, worker: { minWorkers: 0, maxWorkers: 2, idleTtlMs: 1000 } },
+    daemon: { unixSocket: socket, worker: { minWorkers: 0, maxWorkers: 3, idleTtlMs: 1000 } },
     servers: { local: { endpoint: `unix://${socket}` } },
   }),
 );
@@ -97,6 +97,10 @@ try {
   await cli([...base, "messages", parsed.threadId]);
   await cli([...base, "name", parsed.threadId, "renamed"]);
   await cli([...base, "models"]);
+  const prompted = await cli([...base, "new", "--cwd", workdir, "hi"]);
+  if (/worker\.started|message\.delta|turn\.started/.test(prompted)) {
+    throw new Error(`default streaming leaked raw daemon events:\n${prompted}`);
+  }
   await cli([...base, "daemon", "stop"]);
   console.log("mock smoke passed");
 } finally {

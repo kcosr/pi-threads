@@ -86,6 +86,10 @@ export function resolveEndpoint(options: {
   return options.config.servers[alias]?.endpoint ?? options.config.daemon.unixSocket;
 }
 
+export function serverNameCandidates(path?: string): string[] {
+  return Object.keys(loadConfig(path).servers);
+}
+
 export function ensureParentDir(path: string): string {
   return dirname(resolve(path));
 }

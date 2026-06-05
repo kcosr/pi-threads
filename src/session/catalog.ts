@@ -25,16 +25,15 @@ export class PiSessionCatalog {
     return sessions.map((session) => this.toSummary(session));
   }
 
-  async search(query: string, cwd?: string, limit = 25): Promise<ThreadSummary[]> {
+  async search(query: string, cwd?: string, limit?: number): Promise<ThreadSummary[]> {
     const lower = query.toLowerCase();
     const sessions = await this.list(cwd);
-    return sessions
-      .filter((session) =>
-        [session.threadId, session.name, session.firstMessage, session.cwd]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(lower)),
-      )
-      .slice(0, limit);
+    const results = sessions.filter((session) =>
+      [session.threadId, session.name, session.firstMessage, session.cwd]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(lower)),
+    );
+    return limit === undefined ? results : results.slice(0, limit);
   }
 
   async resolveThread(threadIdOrPath: string): Promise<SessionInfo> {
