@@ -111,9 +111,9 @@ export class WorkerPool {
       [...this.workers.values()].find((worker) => worker.state === "idle" && !worker.threadId);
     const worker = idle ?? (await this.spawn(cwd));
     if (worker.threadId !== threadId) {
+      worker.state = "assigned";
       await worker.command({ type: "switch_session", sessionPath });
       worker.threadId = threadId;
-      worker.state = "assigned";
     }
     return worker;
   }

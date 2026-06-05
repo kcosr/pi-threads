@@ -1,6 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { setTimeout as delay } from "node:timers/promises";
 import { DaemonError } from "../errors.ts";
 import { isSupportedPiVersion } from "../version.ts";
 
@@ -47,6 +46,7 @@ export class PiRpcWorker extends EventEmitter {
       timer: NodeJS.Timeout;
     }
   >();
+  private commandQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: PiRpcWorkerOptions) {
     super();
@@ -91,11 +91,59 @@ export class PiRpcWorker extends EventEmitter {
   }
 
   async command(command: Record<string, unknown>, timeoutMs = 60_000): Promise<PiRpcResponse> {
+    validateCommand(command);
+    if (isBypassCommand(command.type)) {
+      return this.executeCommand(command, timeoutMs);
+    }
+    return this.enqueueCommand(() => this.executeCommand(command, timeoutMs));
+  }
+
+  sendRaw(value: unknown): void {
+    validateRawMessage(value);
+    if (!this.child || this.state === "crashed" || this.state === "stopped") {
+      throw new DaemonError("workerCrashed", "Worker is not running", { workerId: this.workerId });
+    }
+    this.child.stdin.write(`${JSON.stringify(value)}\n`);
+  }
+
+  async getState(): Promise<Record<string, unknown>> {
+    const response = await this.command({ type: "get_state" }, 20_000);
+    return (response.data ?? {}) as Record<string, unknown>;
+  }
+
+  async stop(timeoutMs = 2_000): Promise<void> {
+    const child = this.child;
+    if (!child || this.state === "stopped") {
+      return;
+    }
+    this.state = "stopped";
+    child.stdin.end();
+    child.kill("SIGTERM");
+    const exited = await waitForExit(child, timeoutMs);
+    if (!exited) {
+      child.kill("SIGKILL");
+      await waitForExit(child, 1_000);
+    }
+  }
+
+  private async enqueueCommand<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.commandQueue.then(task, task);
+    this.commandQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async executeCommand(
+    command: Record<string, unknown>,
+    timeoutMs = 60_000,
+  ): Promise<PiRpcResponse> {
     if (!this.child || this.state === "crashed" || this.state === "stopped") {
       throw new DaemonError("workerCrashed", "Worker is not running", { workerId: this.workerId });
     }
     const id = `rpc_${this.nextCommandId++}`;
-    const payload = { id, ...command };
+    const payload = { ...command, id };
     const response = await new Promise<PiRpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -111,28 +159,6 @@ export class PiRpcWorker extends EventEmitter {
     }
     this.lastUsedAt = new Date();
     return response;
-  }
-
-  sendRaw(value: unknown): void {
-    this.child?.stdin.write(`${JSON.stringify(value)}\n`);
-  }
-
-  async getState(): Promise<Record<string, unknown>> {
-    const response = await this.command({ type: "get_state" }, 20_000);
-    return (response.data ?? {}) as Record<string, unknown>;
-  }
-
-  async stop(timeoutMs = 2_000): Promise<void> {
-    if (!this.child || this.state === "stopped") {
-      return;
-    }
-    this.state = "stopped";
-    this.child.stdin.end();
-    this.child.kill("SIGTERM");
-    await delay(timeoutMs);
-    if (!this.child.killed) {
-      this.child.kill("SIGKILL");
-    }
   }
 
   private handleStdout(chunk: string): void {
@@ -182,4 +208,57 @@ export async function probePiVersion(piBin?: string, timeoutMs = 5_000): Promise
     throw new DaemonError("piRpcError", "Unable to run pi --version", { exitCode });
   }
   return (output || errorOutput).trim();
+}
+
+function validateCommand(command: unknown): asserts command is Record<string, unknown> {
+  if (!isRecord(command) || typeof command.type !== "string" || command.type.length === 0) {
+    throw new DaemonError("invalidParams", "Pi RPC command must be an object with a type", {
+      command,
+    });
+  }
+  if ("id" in command) {
+    throw new DaemonError("invalidParams", "Pi RPC command id is assigned by pi-threads", {
+      command: command.type,
+    });
+  }
+}
+
+function validateRawMessage(value: unknown): asserts value is Record<string, unknown> {
+  if (!isRecord(value) || typeof value.type !== "string" || value.type.length === 0) {
+    throw new DaemonError("invalidParams", "Pi RPC raw message must be an object with a type", {
+      value,
+    });
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBypassCommand(type: unknown): boolean {
+  return type === "abort" || type === "abort_bash";
+}
+
+async function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      cleanup();
+      resolve(true);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+    };
+    child.once("exit", onExit);
+  });
 }

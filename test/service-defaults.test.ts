@@ -62,6 +62,21 @@ describe("PiThreadsService config defaults", () => {
     expect(worker.commands).not.toContainEqual({ type: "set_thinking_level", level: "high" });
     expect(worker.commands).toContainEqual({ type: "prompt", message: "continue" });
   });
+
+  it("does not let extension UI responses override Pi RPC envelope fields", async () => {
+    const worker = new FakeWorker();
+    const service = serviceWithWorker(worker, {});
+
+    await service.threadExtensionUiRespond({
+      threadId: "thread-1",
+      requestId: "request-1",
+      response: { id: "attacker-id", type: "wrong_type", selected: "ok" },
+    });
+
+    expect(worker.rawMessages).toEqual([
+      { id: "request-1", type: "extension_ui_response", selected: "ok" },
+    ]);
+  });
 });
 
 function serviceWithWorker(
@@ -108,6 +123,7 @@ class FakeWorker implements PooledWorker {
   lastUsedAt = new Date();
   pid = 123;
   readonly commands: Record<string, unknown>[] = [];
+  readonly rawMessages: unknown[] = [];
 
   async start(): Promise<void> {}
 
@@ -120,7 +136,9 @@ class FakeWorker implements PooledWorker {
     return { sessionId: "thread-1", sessionFile: "/tmp/project/session.jsonl" };
   }
 
-  sendRaw(): void {}
+  sendRaw(value: unknown): void {
+    this.rawMessages.push(value);
+  }
 
   async stop(): Promise<void> {}
 

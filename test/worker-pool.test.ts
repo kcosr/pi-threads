@@ -67,6 +67,33 @@ describe("WorkerPool lifecycle", () => {
     expect(pool.list()[0]?.workerId).not.toBe(created[0]!.workerId);
     await pool.stopAll();
   });
+
+  it("reserves a worker while switching sessions", async () => {
+    const created: FakeWorker[] = [];
+    const pool = new WorkerPool(
+      {
+        minWorkers: 0,
+        maxWorkers: 2,
+        idleTtlMs: 300_000,
+        workerFactory: ({ workerId, cwd }) => {
+          const worker = new FakeWorker(workerId, cwd);
+          worker.switchDelayMs = 50;
+          created.push(worker);
+          return worker;
+        },
+      },
+      new EventBus(),
+    );
+
+    await pool.start();
+    const switching = pool.acquireForSession("thread-1", "/tmp/project", "/tmp/project/session");
+    await eventually(() => expect(created[0]?.state).toBe("assigned"));
+    const newWorker = await pool.acquireForNew("/tmp/project");
+
+    expect(newWorker.workerId).not.toBe(created[0]!.workerId);
+    await switching;
+    await pool.stopAll();
+  });
 });
 
 function fakeWorkerFactory(): NonNullable<
@@ -83,6 +110,7 @@ class FakeWorker {
   activeTurnId: string | undefined;
   lastUsedAt = new Date();
   pid = 1234;
+  switchDelayMs = 0;
   private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
 
   constructor(
@@ -97,6 +125,9 @@ class FakeWorker {
   async command(command: Record<string, unknown>) {
     this.lastUsedAt = new Date();
     if (command.type === "switch_session") {
+      if (this.switchDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.switchDelayMs));
+      }
       this.threadId = "switched";
     }
     return { type: "response" as const, command: String(command.type), success: true };

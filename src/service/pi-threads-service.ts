@@ -455,10 +455,11 @@ export class PiThreadsService {
     response: unknown;
   }) {
     const worker = await this.workerForRequiredMethod(params.threadId);
+    const response = isRecord(params.response) ? params.response : { value: params.response };
     worker.sendRaw({
-      type: "extension_ui_response",
+      ...response,
       id: params.requestId,
-      ...(params.response as object),
+      type: "extension_ui_response",
     });
     this.events.emit({
       type: "extension_ui.completed",
@@ -697,6 +698,10 @@ function preview(value: string | undefined): string | undefined {
     return undefined;
   }
   return value.length > 120 ? `${value.slice(0, 117)}...` : value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function withDefaults<T extends { model?: string; thinking?: string }>(
