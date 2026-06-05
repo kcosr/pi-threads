@@ -2,7 +2,7 @@ import net from "node:net";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import WebSocket from "ws";
-import { DaemonError } from "../errors.ts";
+import { DaemonError, type ErrorCode } from "../errors.ts";
 import type { DaemonEvent } from "../protocol/events.ts";
 import { encodeJsonLine } from "../protocol/json-rpc.ts";
 
@@ -60,7 +60,10 @@ export class DaemonClient extends EventEmitter {
   }
 
   private handleLine(line: string): void {
-    const payload = JSON.parse(line) as Record<string, any>;
+    const payload = safeParseDaemonLine(line);
+    if (!payload) {
+      return;
+    }
     if (payload.method === "thread/event") {
       this.emit("event", payload.params as DaemonEvent);
       return;
@@ -71,14 +74,34 @@ export class DaemonClient extends EventEmitter {
       return;
     }
     this.pending.delete(id);
-    if (payload.error) {
+    if (isRecord(payload.error)) {
       pending.reject(
-        new DaemonError(payload.error.code, payload.error.message, payload.error.data),
+        new DaemonError(
+          String(payload.error.code ?? "internal") as ErrorCode,
+          String(payload.error.message ?? "Daemon returned an error"),
+          isRecord(payload.error.data) ? payload.error.data : undefined,
+        ),
       );
     } else {
       pending.resolve(payload.result);
     }
   }
+}
+
+function safeParseDaemonLine(line: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(line);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface ClientTransport {

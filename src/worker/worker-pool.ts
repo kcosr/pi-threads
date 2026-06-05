@@ -91,7 +91,9 @@ export class WorkerPool {
     const idle = [...this.workers.values()].find(
       (worker) => worker.state === "idle" && worker.cwd === cwd && !worker.threadId,
     );
-    return idle ?? this.spawn(cwd);
+    const worker = idle ?? (await this.spawn(cwd));
+    worker.state = "assigned";
+    return worker;
   }
 
   async acquireForSession(
@@ -111,9 +113,17 @@ export class WorkerPool {
       [...this.workers.values()].find((worker) => worker.state === "idle" && !worker.threadId);
     const worker = idle ?? (await this.spawn(cwd));
     if (worker.threadId !== threadId) {
+      const previousThreadId = worker.threadId;
       worker.state = "assigned";
-      await worker.command({ type: "switch_session", sessionPath });
       worker.threadId = threadId;
+      try {
+        const response = await worker.command({ type: "switch_session", sessionPath });
+        assertNotCancelled(response, "switch_session");
+      } catch (error) {
+        worker.threadId = previousThreadId;
+        worker.state = previousThreadId ? "assigned" : "idle";
+        throw error;
+      }
     }
     return worker;
   }
@@ -241,13 +251,68 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
     };
   }
   if (type === "agent_end") {
+    if (raw.willRetry === true) {
+      return {
+        type: "thread.updated" as const,
+        workerId: worker.workerId,
+        threadId: worker.threadId,
+        turnId: worker.activeTurnId,
+        payload: { piEvent: raw, status: "retrying" },
+      };
+    }
     worker.state = "assigned";
+    const failure = agentFailure(raw);
+    if (failure) {
+      return {
+        type: "turn.failed" as const,
+        workerId: worker.workerId,
+        threadId: worker.threadId,
+        turnId: worker.activeTurnId,
+        payload: { piEvent: raw, status: "failed", ...failure },
+      };
+    }
     return {
       type: "turn.completed" as const,
       workerId: worker.workerId,
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
       payload: { piEvent: raw, status: "completed" },
+    };
+  }
+  if (type === "auto_retry_start") {
+    return {
+      type: "retry.scheduled" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "auto_retry_end") {
+    return {
+      type: "retry.completed" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "compaction_start") {
+    return {
+      type: "compaction.started" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "compaction_end") {
+    return {
+      type: "compaction.completed" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
     };
   }
   if (type === "extension_ui_request") {
@@ -259,18 +324,45 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
       payload: raw,
     };
   }
-  if (type.includes("tool") || type.includes("bash")) {
+  if (type === "extension_error") {
     return {
-      type: type.includes("start") ? ("tool.started" as const) : ("tool.completed" as const),
+      type: "extension.error" as const,
       workerId: worker.workerId,
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
       payload: raw,
     };
   }
-  if (type.includes("message")) {
+  if (type === "tool_execution_start") {
     return {
-      type: type.includes("complete") ? ("message.completed" as const) : ("message.delta" as const),
+      type: "tool.started" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "tool_execution_update" || type === "tool_execution_end") {
+    return {
+      type: "tool.completed" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "message_start" || type === "message_update") {
+    return {
+      type: "message.delta" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "message_end") {
+    return {
+      type: "message.completed" as const,
       workerId: worker.workerId,
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
@@ -284,4 +376,36 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
     turnId: worker.activeTurnId,
     payload: { piEvent: raw },
   };
+}
+
+function assertNotCancelled(response: PiRpcResponse, command: string): void {
+  if (
+    response.data &&
+    typeof response.data === "object" &&
+    (response.data as Record<string, unknown>).cancelled === true
+  ) {
+    throw new DaemonError("piRpcError", "Pi RPC command was cancelled", { command });
+  }
+}
+
+function agentFailure(raw: Record<string, unknown>):
+  | { errorCode: "piRpcError"; message: string; stopReason?: string }
+  | undefined {
+  const messages = Array.isArray(raw.messages) ? raw.messages : [];
+  const failed = messages
+    .map((message) => (message && typeof message === "object" ? message : undefined))
+    .filter((message): message is Record<string, unknown> => Boolean(message))
+    .find((message) => {
+      const stopReason = message.stopReason;
+      return stopReason === "error" || stopReason === "aborted";
+    });
+  if (!failed) {
+    return undefined;
+  }
+  const stopReason = typeof failed.stopReason === "string" ? failed.stopReason : undefined;
+  const message =
+    typeof failed.errorMessage === "string"
+      ? failed.errorMessage
+      : `Pi turn ended with stopReason ${stopReason ?? "unknown"}`;
+  return { errorCode: "piRpcError", message, stopReason };
 }

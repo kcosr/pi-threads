@@ -173,7 +173,10 @@ export class PiRpcWorker extends EventEmitter {
       if (!rawLine) {
         continue;
       }
-      const parsed = JSON.parse(rawLine) as Record<string, unknown>;
+      const parsed = safeParseWorkerLine(rawLine);
+      if (!parsed) {
+        continue;
+      }
       if (parsed.type === "response" && typeof parsed.id === "string") {
         const pending = this.pending.get(parsed.id);
         if (pending) {
@@ -186,6 +189,19 @@ export class PiRpcWorker extends EventEmitter {
       }
     }
   }
+}
+
+function safeParseWorkerLine(rawLine: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(rawLine);
+    if (isRecord(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Pi RPC stdout is expected to be JSONL, but dependency warnings or crash
+    // output must not take down the daemon.
+  }
+  return undefined;
 }
 
 export async function probePiVersion(piBin?: string, timeoutMs = 5_000): Promise<string> {

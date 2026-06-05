@@ -9,7 +9,6 @@ import type {
   AcceptedTurn,
   QueuedFollowUp,
   ServerStatus,
-  SubscriptionRequest,
   ThreadReadResult,
   ThreadSummary,
 } from "../protocol/types.ts";
@@ -38,7 +37,7 @@ export class PiThreadsService {
   readonly workers: WorkerPool;
   private readonly defaults: PiThreadsConfig["defaults"];
   private readonly startedAt = Date.now();
-  private readonly activeTurns = new Map<string, { turnId: string; workerId: string }>();
+  private readonly activeTurns = new Map<string, { turnId: string; workerId?: string }>();
   private transportNames: string[] = [];
   private shuttingDown = false;
 
@@ -58,7 +57,20 @@ export class PiThreadsService {
         },
         this.events,
       );
-    this.events.subscribe({}, (event) => void this.handleDaemonEvent(event));
+    this.events.subscribe({}, (event) => {
+      void this.handleDaemonEvent(event).catch((error) => {
+        this.events.emit({
+          type: "thread.updated",
+          threadId: event.threadId,
+          turnId: event.turnId,
+          workerId: event.workerId,
+          payload: {
+            internalError: error instanceof Error ? error.message : String(error),
+            sourceEvent: event.type,
+          },
+        });
+      });
+    });
   }
 
   setTransports(transports: string[]): void {
@@ -167,41 +179,53 @@ export class PiThreadsService {
   }): Promise<AcceptedTurn> {
     const cwd = resolve(params.cwd);
     const worker = await this.workers.acquireForNew(cwd);
-    worker.state = "assigned";
-    await worker.command({ type: "new_session" }, 20_000);
-    let state = await worker.getState();
-    if (params.name) {
-      await worker.command({ type: "set_session_name", name: params.name }, 20_000);
+    try {
+      const settings = withDefaults(params, this.defaults);
+      const model =
+        settings.model === undefined
+          ? undefined
+          : await this.resolveModelSelection(worker, settings.model);
+      assertNotCancelled(await worker.command({ type: "new_session" }, 20_000), "new_session");
+      let state = await worker.getState();
+      if (params.name) {
+        await worker.command({ type: "set_session_name", name: params.name }, 20_000);
+      }
+      await this.applyResolvedSettings(worker, { model, thinking: settings.thinking });
+      state = await worker.getState();
+      const threadId = String(state.sessionId);
+      worker.threadId = threadId;
+      this.catalog.updateFromWorkerState({
+        sessionId: threadId,
+        sessionFile: String(state.sessionFile ?? ""),
+        cwd,
+        sessionName: params.name,
+      });
+      const turnId = newTurnId();
+      worker.activeTurnId = turnId;
+      this.activeTurns.set(threadId, { turnId, workerId: worker.workerId });
+      this.events.emit({
+        type: "turn.accepted",
+        threadId,
+        turnId,
+        workerId: worker.workerId,
+        payload: { promptPreview: preview(params.prompt), cwd },
+      });
+      if (params.prompt) {
+        worker.state = "running";
+        void worker
+          .command({ type: "prompt", message: params.prompt }, 20_000)
+          .catch((error) => this.failTurn(threadId, turnId, worker, error));
+      } else {
+        this.completePromptlessTurn(threadId, turnId, worker);
+      }
+      return { threadId, turnId, workerId: worker.workerId, status: "accepted" };
+    } catch (error) {
+      worker.activeTurnId = undefined;
+      if (!worker.threadId) {
+        this.workers.release(worker);
+      }
+      throw error;
     }
-    await this.applySettings(worker, withDefaults(params, this.defaults));
-    state = await worker.getState();
-    const threadId = String(state.sessionId);
-    worker.threadId = threadId;
-    this.catalog.updateFromWorkerState({
-      sessionId: threadId,
-      sessionFile: String(state.sessionFile ?? ""),
-      cwd,
-      sessionName: params.name,
-    });
-    const turnId = newTurnId();
-    worker.activeTurnId = turnId;
-    this.activeTurns.set(threadId, { turnId, workerId: worker.workerId });
-    this.events.emit({
-      type: "turn.accepted",
-      threadId,
-      turnId,
-      workerId: worker.workerId,
-      payload: { promptPreview: preview(params.prompt), cwd },
-    });
-    if (params.prompt) {
-      worker.state = "running";
-      void worker
-        .command({ type: "prompt", message: params.prompt }, 20_000)
-        .catch((error) => this.failTurn(threadId, turnId, worker, error));
-    } else {
-      this.completePromptlessTurn(threadId, turnId, worker);
-    }
-    return { threadId, turnId, workerId: worker.workerId, status: "accepted" };
   }
 
   async threadSend(params: {
@@ -212,24 +236,30 @@ export class PiThreadsService {
   }): Promise<AcceptedTurn> {
     const session = await this.catalog.resolveThread(params.threadId);
     this.catalog.assertUnchanged(session.id);
-    const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
-    await this.applySettings(worker, params);
     const turnId = newTurnId();
-    worker.activeTurnId = turnId;
-    worker.threadId = session.id;
-    worker.state = "running";
-    this.activeTurns.set(session.id, { turnId, workerId: worker.workerId });
-    this.events.emit({
-      type: "turn.accepted",
-      threadId: session.id,
-      turnId,
-      workerId: worker.workerId,
-      payload: { promptPreview: preview(params.prompt) },
-    });
-    void worker
-      .command({ type: "prompt", message: params.prompt }, 20_000)
-      .catch((error) => this.failTurn(session.id, turnId, worker, error));
-    return { threadId: session.id, turnId, workerId: worker.workerId, status: "accepted" };
+    this.reserveTurn(session.id, turnId);
+    try {
+      const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
+      await this.applySettings(worker, params);
+      worker.activeTurnId = turnId;
+      worker.threadId = session.id;
+      worker.state = "running";
+      this.activeTurns.set(session.id, { turnId, workerId: worker.workerId });
+      this.events.emit({
+        type: "turn.accepted",
+        threadId: session.id,
+        turnId,
+        workerId: worker.workerId,
+        payload: { promptPreview: preview(params.prompt) },
+      });
+      void worker
+        .command({ type: "prompt", message: params.prompt }, 20_000)
+        .catch((error) => this.failTurn(session.id, turnId, worker, error));
+      return { threadId: session.id, turnId, workerId: worker.workerId, status: "accepted" };
+    } catch (error) {
+      this.activeTurns.delete(session.id);
+      throw error;
+    }
   }
 
   async threadSteer(params: { threadId: string; prompt: string }): Promise<AcceptedTurn> {
@@ -309,6 +339,7 @@ export class PiThreadsService {
     const session = await this.catalog.resolveThread(params.threadId);
     const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
     const response = await worker.command({ type: "fork", entryId: params.entryId }, 60_000);
+    assertNotCancelled(response, "fork");
     if (params.name) {
       await worker.command({ type: "set_session_name", name: params.name }, 20_000);
     }
@@ -324,9 +355,14 @@ export class PiThreadsService {
   }
 
   async threadClone(params: { threadId: string; name?: string }) {
+    if (this.activeTurns.has(params.threadId)) {
+      throw new DaemonError("busy", "Cannot clone a thread with an active daemon turn", {
+        threadId: params.threadId,
+      });
+    }
     const session = await this.catalog.resolveThread(params.threadId);
     const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
-    await worker.command({ type: "clone" }, 60_000);
+    assertNotCancelled(await worker.command({ type: "clone" }, 60_000), "clone");
     if (params.name) {
       await worker.command({ type: "set_session_name", name: params.name }, 20_000);
     }
@@ -568,12 +604,6 @@ export class PiThreadsService {
         return this.modelsList(params as { provider?: string });
       case "usage/read":
         return this.usageRead(params as { threadId?: string });
-      case "subscribe/thread":
-      case "subscribe/all":
-      case "subscribe/workers":
-        return { subscription: "adapter-owned", filter: params as SubscriptionRequest };
-      case "unsubscribe/thread":
-        return { ok: true };
       default:
         throw new DaemonError("notFound", "Unknown method", { method });
     }
@@ -581,10 +611,10 @@ export class PiThreadsService {
 
   private requireActive(threadId: string): { turnId: string; workerId: string } {
     const active = this.activeTurns.get(threadId);
-    if (!active) {
+    if (!active?.workerId) {
       throw new DaemonError("busy", "Thread does not have a running daemon turn", { threadId });
     }
-    return active;
+    return { turnId: active.turnId, workerId: active.workerId };
   }
 
   private async workerForRequiredMethod(threadId: string): Promise<PooledWorker> {
@@ -602,7 +632,22 @@ export class PiThreadsService {
   ): Promise<void> {
     if (params.model) {
       const { provider, modelId } = await this.resolveModelSelection(worker, params.model);
-      await worker.command({ type: "set_model", provider, modelId }, 20_000);
+      await this.applyResolvedSettings(worker, { model: { provider, modelId } });
+    }
+    if (params.thinking) {
+      await this.applyResolvedSettings(worker, { thinking: params.thinking });
+    }
+  }
+
+  private async applyResolvedSettings(
+    worker: PooledWorker,
+    params: { model?: { provider: string; modelId: string }; thinking?: string },
+  ): Promise<void> {
+    if (params.model) {
+      await worker.command(
+        { type: "set_model", provider: params.model.provider, modelId: params.model.modelId },
+        20_000,
+      );
     }
     if (params.thinking) {
       await worker.command({ type: "set_thinking_level", level: params.thinking }, 20_000);
@@ -614,7 +659,12 @@ export class PiThreadsService {
     model: string,
   ): Promise<{ provider: string; modelId: string }> {
     if (model.includes("/")) {
-      const [provider, modelId] = model.split("/", 2);
+      const slash = model.indexOf("/");
+      const provider = model.slice(0, slash);
+      const modelId = model.slice(slash + 1);
+      if (!provider || !modelId || modelId.includes("/")) {
+        throw new DaemonError("invalidParams", "Model must be provider/modelId", { model });
+      }
       return { provider, modelId };
     }
     const response = await worker.command({ type: "get_available_models" }, 30_000);
@@ -662,19 +712,26 @@ export class PiThreadsService {
     });
   }
 
+  private reserveTurn(threadId: string, turnId: string): void {
+    if (this.activeTurns.has(threadId)) {
+      throw new DaemonError("busy", "Thread already has an active daemon turn", { threadId });
+    }
+    this.activeTurns.set(threadId, { turnId });
+  }
+
   private async handleDaemonEvent(event: DaemonEvent): Promise<void> {
     if (this.shuttingDown) {
       return;
     }
-    if (event.type !== "turn.completed" || !event.threadId || !event.turnId) {
+    if (!isTerminalDaemonEvent(event.type) || !event.threadId || !event.turnId) {
       return;
     }
     const active = this.activeTurns.get(event.threadId);
-    if (!active || active.turnId !== event.turnId) {
+    if (!active?.workerId || active.turnId !== event.turnId) {
       return;
     }
     this.activeTurns.delete(event.threadId);
-    const worker = this.workers.read(active.workerId);
+    const worker = this.workers.findByThread(event.threadId) ?? this.workers.read(active.workerId);
     worker.activeTurnId = undefined;
     const state = await worker.getState().catch(() => undefined);
     if (state) {
@@ -743,7 +800,8 @@ function filterMessages(
   const since = parseSince(options.since);
   let filtered = messages;
   if (options.role) {
-    filtered = filtered.filter((message) => messageRole(message) === options.role);
+    const role = piRole(options.role);
+    filtered = filtered.filter((message) => messageRole(message) === role);
   }
   if (since !== undefined) {
     filtered = filtered.filter((message) => {
@@ -768,6 +826,16 @@ function messageRole(message: unknown): unknown {
     return undefined;
   }
   return (message as Record<string, unknown>).role;
+}
+
+function piRole(role: string): string {
+  if (role === "tool") {
+    return "toolResult";
+  }
+  if (role === "bash") {
+    return "bashExecution";
+  }
+  return role;
 }
 
 function messageTimestamp(message: unknown): number | undefined {
@@ -869,7 +937,7 @@ function parseThreadDate(value: string | undefined): number {
 function overlayWorkerThreadStatuses(
   catalogThreads: ThreadSummary[],
   workers: ReturnType<WorkerPool["list"]>,
-  activeTurns: Map<string, { turnId: string; workerId: string }>,
+  activeTurns: Map<string, { turnId: string; workerId?: string }>,
   cwd?: string,
 ): ThreadSummary[] {
   const resolvedCwd = cwd ? resolve(cwd) : undefined;
@@ -893,4 +961,18 @@ function overlayWorkerThreadStatuses(
     });
   }
   return threads;
+}
+
+function assertNotCancelled(response: { data?: unknown }, command: string): void {
+  if (
+    response.data &&
+    typeof response.data === "object" &&
+    (response.data as Record<string, unknown>).cancelled === true
+  ) {
+    throw new DaemonError("piRpcError", "Pi RPC command was cancelled", { command });
+  }
+}
+
+function isTerminalDaemonEvent(type: string): boolean {
+  return type === "turn.completed" || type === "turn.failed" || type === "turn.aborted";
 }

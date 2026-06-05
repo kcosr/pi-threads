@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventBus } from "../src/service/event-bus.ts";
+import type { DaemonEvent } from "../src/protocol/events.ts";
 import { WorkerPool, type PooledWorker } from "../src/worker/worker-pool.ts";
 
 describe("WorkerPool lifecycle", () => {
@@ -94,6 +95,99 @@ describe("WorkerPool lifecycle", () => {
     await switching;
     await pool.stopAll();
   });
+
+  it("reserves workers atomically for concurrent new sessions", async () => {
+    const pool = new WorkerPool(
+      {
+        minWorkers: 1,
+        maxWorkers: 2,
+        idleTtlMs: 300_000,
+        prewarmCwd: "/tmp/project",
+        workerFactory: fakeWorkerFactory(),
+      },
+      new EventBus(),
+    );
+
+    await pool.start();
+    const [left, right] = await Promise.all([
+      pool.acquireForNew("/tmp/project"),
+      pool.acquireForNew("/tmp/project"),
+    ]);
+
+    expect(left.workerId).not.toBe(right.workerId);
+    expect(pool.list().map((worker) => worker.state)).toEqual(["assigned", "assigned"]);
+    await pool.stopAll();
+  });
+
+  it("does not complete a turn on retrying agent_end", async () => {
+    const events = new EventBus();
+    const observed: DaemonEvent[] = [];
+    events.subscribe({}, (event) => observed.push(event));
+    const pool = new WorkerPool(
+      {
+        minWorkers: 0,
+        maxWorkers: 1,
+        idleTtlMs: 300_000,
+        workerFactory: fakeWorkerFactory(),
+      },
+      events,
+    );
+
+    const worker = await pool.acquireForNew("/tmp/project");
+    worker.threadId = "thread-1";
+    worker.activeTurnId = "turn-1";
+    worker.state = "running";
+    (worker as FakeWorker).emitEvent({
+      type: "agent_end",
+      willRetry: true,
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "retry me" }],
+    });
+    (worker as FakeWorker).emitEvent({
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 1,
+      errorMessage: "retry me",
+    });
+
+    expect(observed.map((event) => event.type)).not.toContain("turn.completed");
+    expect(observed.map((event) => event.type)).toContain("retry.scheduled");
+    expect(worker.state).toBe("running");
+    await pool.stopAll();
+  });
+
+  it("maps real Pi terminal message and failed agent events", async () => {
+    const events = new EventBus();
+    const observed: DaemonEvent[] = [];
+    events.subscribe({}, (event) => observed.push(event));
+    const pool = new WorkerPool(
+      {
+        minWorkers: 0,
+        maxWorkers: 1,
+        idleTtlMs: 300_000,
+        workerFactory: fakeWorkerFactory(),
+      },
+      events,
+    );
+
+    const worker = await pool.acquireForNew("/tmp/project");
+    worker.threadId = "thread-1";
+    worker.activeTurnId = "turn-1";
+    worker.state = "running";
+    (worker as FakeWorker).emitEvent({ type: "message_end", message: { role: "assistant" } });
+    (worker as FakeWorker).emitEvent({
+      type: "agent_end",
+      willRetry: false,
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "failed" }],
+    });
+
+    expect(observed.map((event) => event.type)).toContain("message.completed");
+    expect(observed.at(-1)).toMatchObject({
+      type: "turn.failed",
+      payload: { message: "failed", stopReason: "error" },
+    });
+    await pool.stopAll();
+  });
 });
 
 function fakeWorkerFactory(): NonNullable<
@@ -128,7 +222,6 @@ class FakeWorker {
       if (this.switchDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, this.switchDelayMs));
       }
-      this.threadId = "switched";
     }
     return { type: "response" as const, command: String(command.type), success: true };
   }
@@ -150,6 +243,12 @@ class FakeWorker {
     this.state = "crashed";
     for (const listener of this.listeners.get("exit") ?? []) {
       listener({ exitCode: 1, signal: null });
+    }
+  }
+
+  emitEvent(event: unknown): void {
+    for (const listener of this.listeners.get("event") ?? []) {
+      listener(event);
     }
   }
 

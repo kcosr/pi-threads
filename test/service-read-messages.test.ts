@@ -184,6 +184,28 @@ describe("PiThreadsService read/message filters", () => {
       { role: "assistant", createdAt: "2026-06-05T12:02:00Z", content: "new assistant" },
     ]);
   });
+
+  it("maps user-facing tool and bash role filters to Pi message roles", async () => {
+    const service = serviceWithCatalog({
+      messages: async () => ({
+        threadId: "thread-1",
+        messages: [
+          { role: "toolResult", timestamp: 1_780_681_600_000, content: "tool output" },
+          { role: "bashExecution", timestamp: 1_780_681_601_000, command: "pwd" },
+          { role: "assistant", timestamp: 1_780_681_602_000, content: "assistant" },
+        ],
+      }),
+    });
+
+    await expect(service.threadMessages({ threadId: "thread-1", role: "tool" })).resolves.toEqual({
+      threadId: "thread-1",
+      messages: [{ role: "toolResult", timestamp: 1_780_681_600_000, content: "tool output" }],
+    });
+    await expect(service.threadMessages({ threadId: "thread-1", role: "bash" })).resolves.toEqual({
+      threadId: "thread-1",
+      messages: [{ role: "bashExecution", timestamp: 1_780_681_601_000, command: "pwd" }],
+    });
+  });
 });
 
 function serviceWithCatalog(catalog: Record<string, unknown>): PiThreadsService {

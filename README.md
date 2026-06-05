@@ -282,7 +282,7 @@ Daemon worker fields:
 | `daemon.tcp.authToken` | Inline bearer token. Prefer `authTokenEnv` on shared systems. |
 | `daemon.tcp.authTokenEnv` | Environment variable containing the bearer token. |
 | `daemon.tcp.allowedOrigins` | Allowed WebSocket Origin values. Empty allows no browser origins. |
-| `daemon.tcp.tls.ca` | Optional CA path used when creating the HTTPS/WebSocket server. |
+| `daemon.tcp.tls.ca` | Reserved server CA field; it does not enable client-certificate/mTLS authorization today. |
 | `daemon.tcp.tls.cert` | TLS certificate path. Required with `key` for TLS. |
 | `daemon.tcp.tls.key` | TLS private key path. Required with `cert` for TLS. |
 
@@ -465,11 +465,13 @@ at the daemon process cwd. The default is `0`; set it to `1` for a warm local
 worker. `daemon.worker.idleTtlMs` reaps non-running workers after the configured
 idle time, trimming the pool down to `minWorkers`. The default is five minutes.
 
-External writer detection is best-effort. The daemon samples session file size,
-mtime, and last-entry identity before write-producing commands and refuses with
-`externalWriterDetected` if the baseline changed outside daemon-owned
-execution. Direct Pi use still has a race window because Pi does not share a
-lock with this daemon.
+External writer detection is best-effort. For sessions the daemon has written
+during the current process lifetime, it records session file size, mtime, and
+last-entry identity, then refuses later write-producing commands with
+`externalWriterDetected` if that baseline changed outside daemon-owned
+execution. Freshly discovered sessions do not have this protection until the
+daemon records a baseline. Direct Pi use still has a race window because Pi
+does not share a lock with this daemon.
 
 ## Transports And Security
 

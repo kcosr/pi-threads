@@ -46,6 +46,17 @@ describe("PiRpcWorker", () => {
     expect(() => worker.sendRaw(null)).toThrow(/raw message/);
     await worker.stop();
   });
+
+  it("ignores malformed stdout lines without crashing the daemon", async () => {
+    const { bin, root } = fakePiBin();
+    const worker = new PiRpcWorker({ workerId: "worker_1", cwd: root, piBin: bin });
+    await worker.start();
+
+    await expect(worker.command({ type: "garbage_then_ok" }, 2_000)).resolves.toMatchObject({
+      success: true,
+    });
+    await worker.stop();
+  });
 });
 
 function fakePiBin(): { bin: string; logPath: string; root: string } {
@@ -83,7 +94,11 @@ process.stdin.on("data", (chunk) => {
     if (!line) continue;
     const command = JSON.parse(line);
     log("start " + command.type);
-    if (command.type === "slow") {
+    if (command.type === "garbage_then_ok") {
+      process.stdout.write("this is not json\\n");
+      log("end " + command.type);
+      send({ id: command.id, type: "response", command: command.type, success: true });
+    } else if (command.type === "slow") {
       setTimeout(() => {
         log("end " + command.type);
         send({ id: command.id, type: "response", command: command.type, success: true });
