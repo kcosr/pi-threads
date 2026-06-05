@@ -550,14 +550,36 @@ export class PiThreadsService {
     params: { model?: string; thinking?: string },
   ): Promise<void> {
     if (params.model) {
-      const [provider, modelId] = params.model.includes("/")
-        ? params.model.split("/", 2)
-        : ["", params.model];
+      const { provider, modelId } = await this.resolveModelSelection(worker, params.model);
       await worker.command({ type: "set_model", provider, modelId }, 20_000);
     }
     if (params.thinking) {
       await worker.command({ type: "set_thinking_level", level: params.thinking }, 20_000);
     }
+  }
+
+  private async resolveModelSelection(
+    worker: PiRpcWorker,
+    model: string,
+  ): Promise<{ provider: string; modelId: string }> {
+    if (model.includes("/")) {
+      const [provider, modelId] = model.split("/", 2);
+      return { provider, modelId };
+    }
+    const response = await worker.command({ type: "get_available_models" }, 30_000);
+    const models = ((response.data as { models?: Array<Record<string, unknown>> } | undefined)
+      ?.models ?? []) as Array<Record<string, unknown>>;
+    const match = models.find((candidate) => candidate.id === model || candidate.name === model);
+    if (!match || typeof match.provider !== "string" || typeof match.id !== "string") {
+      throw new DaemonError(
+        "invalidParams",
+        "Model must be provider/modelId or match a configured Pi model id",
+        {
+          model,
+        },
+      );
+    }
+    return { provider: match.provider, modelId: match.id };
   }
 
   private completePromptlessTurn(threadId: string, turnId: string, worker: PiRpcWorker): void {

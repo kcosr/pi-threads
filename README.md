@@ -141,7 +141,7 @@ bun run smoke:mock
 bun run smoke:live
 ```
 
-`smoke:mock` is deterministic and non-costing. `smoke:live` uses real Pi workers and defaults to non-costing checks. Model turns, parallel proof, abort, bash, fork, and external-writer paths are separately opt-in with the `RUN_PI_*` flags documented in `smoke/README.md`.
+`smoke:mock` is deterministic and non-costing. `smoke:live` uses real Pi workers and real model turns by default, including `new`, `send`, `status`, `messages`, `steer`, `abort`, and concurrent multi-worker proof. Use `PI_THREADS_MODEL` and `PI_THREADS_THINKING` to pin a model; otherwise the smoke inherits Pi's configured default model.
 
 ## Build And Release
 
