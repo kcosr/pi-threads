@@ -347,9 +347,9 @@ Global options `--config PATH`, `--connect ENDPOINT`, `--server ALIAS`,
 for example `pi-threads --server local list`.
 
 `list`, `search`, and `messages` accept `--since` as epoch seconds, an ISO
-timestamp, or a relative duration ending in `s`, `m`, `h`, or `d`, such as
-`5m`, `24h`, or `7d`. `--archived` is rejected because `pi-threads` does not
-maintain a daemon-owned archive store.
+timestamp, or a relative duration ending in `ms`, `s`, `m`, `h`, `d`, or `w`,
+such as `500ms`, `5m`, `24h`, or `7d`. `--archived` is rejected because
+`pi-threads` does not maintain a daemon-owned archive store.
 
 ## Shell Completion
 
