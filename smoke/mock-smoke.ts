@@ -62,9 +62,23 @@ const daemon = spawn("bun", ["run", "src/index.ts", "--config", configPath, "dae
   env: { ...process.env, PI_THREADS_PI_BIN: bin },
   stdio: ["ignore", "pipe", "pipe"],
 });
+let daemonStdout = "";
+let daemonStderr = "";
+daemon.stdout.setEncoding("utf8");
+daemon.stderr.setEncoding("utf8");
+daemon.stdout.on("data", (chunk) => {
+  daemonStdout += chunk;
+});
+daemon.stderr.on("data", (chunk) => {
+  daemonStderr += chunk;
+});
 
 try {
-  await waitFor(() => existsSync(socket), 5_000);
+  await waitFor(
+    () => existsSync(socket),
+    5_000,
+    () => `daemon stdout:\n${daemonStdout}\ndaemon stderr:\n${daemonStderr}`,
+  );
   const base = ["run", "src/index.ts", "--config", configPath, "--connect", `unix://${socket}`];
   await cli([...base, "servers", "ping"]);
   const started = await cli([
@@ -109,7 +123,11 @@ async function cli(args: string[]): Promise<string> {
   return stdout;
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+  diagnostics?: () => string,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) {
@@ -117,5 +135,5 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<voi
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("timed out waiting for daemon socket");
+  throw new Error(`timed out waiting for daemon socket\n${diagnostics?.() ?? ""}`);
 }

@@ -15,6 +15,7 @@ export async function startDaemon(
   options?: { stdio?: boolean },
 ): Promise<DaemonRuntime> {
   const service = new PiThreadsService(config);
+  await service.start();
   const transports: RunningTransport[] = [];
   let stopping = false;
   const stop = async () => {

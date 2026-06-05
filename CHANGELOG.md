@@ -7,6 +7,7 @@
 ### Added
 
 - Initial `pi-threads` daemon, CLI, worker-pool, transport, client, test, and smoke scaffold.
+- Worker pool `minWorkers` prewarming and `idleTtlMs` idle reaping.
 
 ### Changed
 

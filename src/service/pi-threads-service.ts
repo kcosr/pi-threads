@@ -14,8 +14,7 @@ import type {
 } from "../protocol/types.ts";
 import { PI_COMPATIBILITY, VERSION } from "../version.ts";
 import { PiSessionCatalog } from "../session/catalog.ts";
-import type { PiRpcWorker } from "../worker/pi-rpc-worker.ts";
-import { WorkerPool } from "../worker/worker-pool.ts";
+import { WorkerPool, type PooledWorker } from "../worker/worker-pool.ts";
 import { EventBus, type EventListener } from "./event-bus.ts";
 
 export class PiThreadsService {
@@ -52,6 +51,10 @@ export class PiThreadsService {
       workers: this.workers.list(),
       transports,
     };
+  }
+
+  async start(): Promise<void> {
+    await this.workers.start();
   }
 
   async shutdown(): Promise<{ ok: true }> {
@@ -536,7 +539,7 @@ export class PiThreadsService {
     return active;
   }
 
-  private async workerForRequiredMethod(threadId: string): Promise<PiRpcWorker> {
+  private async workerForRequiredMethod(threadId: string): Promise<PooledWorker> {
     const assigned = this.workers.findByThread(threadId);
     if (assigned) {
       return assigned;
@@ -546,7 +549,7 @@ export class PiThreadsService {
   }
 
   private async applySettings(
-    worker: PiRpcWorker,
+    worker: PooledWorker,
     params: { model?: string; thinking?: string },
   ): Promise<void> {
     if (params.model) {
@@ -559,7 +562,7 @@ export class PiThreadsService {
   }
 
   private async resolveModelSelection(
-    worker: PiRpcWorker,
+    worker: PooledWorker,
     model: string,
   ): Promise<{ provider: string; modelId: string }> {
     if (model.includes("/")) {
@@ -582,7 +585,7 @@ export class PiThreadsService {
     return { provider: match.provider, modelId: match.id };
   }
 
-  private completePromptlessTurn(threadId: string, turnId: string, worker: PiRpcWorker): void {
+  private completePromptlessTurn(threadId: string, turnId: string, worker: PooledWorker): void {
     queueMicrotask(() => {
       this.activeTurns.delete(threadId);
       worker.activeTurnId = undefined;
@@ -597,7 +600,7 @@ export class PiThreadsService {
     });
   }
 
-  private failTurn(threadId: string, turnId: string, worker: PiRpcWorker, error: unknown): void {
+  private failTurn(threadId: string, turnId: string, worker: PooledWorker, error: unknown): void {
     this.activeTurns.delete(threadId);
     worker.activeTurnId = undefined;
     this.workers.release(worker, threadId);

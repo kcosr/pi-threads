@@ -116,6 +116,8 @@ The core service owns session catalog lookup, worker scheduling, leases, event f
 
 Workers are cwd-aware. A new thread for cwd `X` uses an idle worker already rooted at `X` or spawns a new worker in `X`. Existing sessions can be loaded into idle workers with internal `switch_session`. The daemon enforces one in-memory writer lease per Pi session id.
 
+`daemon.worker.minWorkers` prewarms and maintains that many idle workers rooted at the daemon process cwd. The default is `0`; set it to `1` for a warm local worker. `daemon.worker.idleTtlMs` reaps non-running workers after the configured idle time, trimming the pool down to `minWorkers`. The default is five minutes.
+
 External writer detection is best-effort. The daemon samples session file size, mtime, and last-entry identity before write-producing commands and refuses with `externalWriterDetected` if the baseline changed outside daemon-owned execution. Direct Pi use still has a TOCTOU window because Pi does not share a lock with this daemon.
 
 ## Transports And Security
