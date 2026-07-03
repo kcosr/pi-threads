@@ -63,7 +63,7 @@ export class PiRpcWorker extends EventEmitter {
     if (!isSupportedPiVersion(this.version)) {
       throw new DaemonError("piRpcError", "Unsupported pi version", {
         version: this.version,
-        supported: "0.75.x",
+        supported: "0.75.x - 0.80.x",
       });
     }
     const piBin = this.options.piBin ?? process.env.PI_THREADS_PI_BIN ?? "pi";
