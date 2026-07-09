@@ -658,20 +658,27 @@ export class PiThreadsService {
     worker: PooledWorker,
     model: string,
   ): Promise<{ provider: string; modelId: string }> {
+    let explicitProvider: string | undefined;
+    let explicitModel: string | undefined;
     if (model.includes("/")) {
       const slash = model.indexOf("/");
-      const provider = model.slice(0, slash);
-      const modelId = model.slice(slash + 1);
-      if (!provider || !modelId || modelId.includes("/")) {
+      explicitProvider = model.slice(0, slash);
+      explicitModel = model.slice(slash + 1);
+      if (!explicitProvider || !explicitModel) {
         throw new DaemonError("invalidParams", "Model must be provider/modelId", { model });
       }
-      return { provider, modelId };
     }
     const response = await worker.command({ type: "get_available_models" }, 30_000);
     const models = ((response.data as { models?: Array<Record<string, unknown>> } | undefined)
       ?.models ?? []) as Array<Record<string, unknown>>;
-    const match = models.find((candidate) => candidate.id === model || candidate.name === model);
+    const match = models.find((candidate) => {
+      if (explicitProvider && candidate.provider !== explicitProvider) return false;
+      return candidate.id === (explicitModel ?? model) || candidate.name === (explicitModel ?? model);
+    });
     if (!match || typeof match.provider !== "string" || typeof match.id !== "string") {
+      if (explicitProvider && explicitModel && !explicitModel.includes("/")) {
+        return { provider: explicitProvider, modelId: explicitModel };
+      }
       throw new DaemonError(
         "invalidParams",
         "Model must be provider/modelId or match a configured Pi model id",

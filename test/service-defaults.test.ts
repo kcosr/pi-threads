@@ -46,6 +46,28 @@ describe("PiThreadsService config defaults", () => {
     });
   });
 
+  it("resolves provider-prefixed model names through the Pi catalog", async () => {
+    const worker = new FakeWorker([
+      {
+        provider: "work-gpt-oss-120b",
+        id: "/models/gpt-oss-120b",
+        name: "gpt-oss-120b",
+      },
+    ]);
+    const service = serviceWithWorker(worker, {});
+
+    await service.threadStart({
+      cwd: "/tmp/project",
+      model: "work-gpt-oss-120b/gpt-oss-120b",
+    });
+
+    expect(worker.commands).toContainEqual({
+      type: "set_model",
+      provider: "work-gpt-oss-120b",
+      modelId: "/models/gpt-oss-120b",
+    });
+  });
+
   it("does not reapply new-thread defaults to existing-thread sends", async () => {
     const worker = new FakeWorker();
     const service = serviceWithWorker(worker, {
@@ -113,6 +135,8 @@ function serviceWithWorker(
 }
 
 class FakeWorker implements PooledWorker {
+  constructor(private readonly availableModels: Array<Record<string, unknown>> = []) {}
+
   readonly workerId = "worker-1";
   readonly cwd = "/tmp/project";
   readonly startedAt = new Date();
@@ -129,6 +153,14 @@ class FakeWorker implements PooledWorker {
 
   async command(command: Record<string, unknown>) {
     this.commands.push(command);
+    if (command.type === "get_available_models") {
+      return {
+        type: "response" as const,
+        command: String(command.type),
+        success: true,
+        data: { models: this.availableModels },
+      };
+    }
     return { type: "response" as const, command: String(command.type), success: true };
   }
 

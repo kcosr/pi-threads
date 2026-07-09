@@ -19,6 +19,7 @@
 - Default `new` and `send` waits no longer print raw daemon event lines; explicit `--stream` keeps filtered event progress.
 - `--server` aliases now inherit configured bearer auth and TLS CA settings.
 - `server/status` now reports active daemon transport names.
+- Pi worker startup now gives `pi --version` up to 15 seconds and disables Pi startup network checks for version probes and RPC workers unless explicitly overridden.
 
 ### Fixed
 

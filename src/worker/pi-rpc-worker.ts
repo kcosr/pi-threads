@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import { DaemonError } from "../errors.ts";
 import { isSupportedPiVersion } from "../version.ts";
 
+export const DEFAULT_PI_VERSION_TIMEOUT_MS = 15_000;
+
 export type WorkerProcessState =
   | "starting"
   | "idle"
@@ -59,7 +61,10 @@ export class PiRpcWorker extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    this.version = await probePiVersion(this.options.piBin, this.options.versionTimeoutMs ?? 5_000);
+    this.version = await probePiVersion(
+      this.options.piBin,
+      this.options.versionTimeoutMs ?? DEFAULT_PI_VERSION_TIMEOUT_MS,
+    );
     if (!isSupportedPiVersion(this.version)) {
       throw new DaemonError("piRpcError", "Unsupported pi version", {
         version: this.version,
@@ -70,7 +75,7 @@ export class PiRpcWorker extends EventEmitter {
     this.child = spawn(piBin, ["--mode", "rpc"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PI_OFFLINE: process.env.PI_OFFLINE ?? "1" },
+      env: piWorkerEnv(),
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
@@ -204,9 +209,15 @@ function safeParseWorkerLine(rawLine: string): Record<string, unknown> | undefin
   return undefined;
 }
 
-export async function probePiVersion(piBin?: string, timeoutMs = 5_000): Promise<string> {
+export async function probePiVersion(
+  piBin?: string,
+  timeoutMs = DEFAULT_PI_VERSION_TIMEOUT_MS,
+): Promise<string> {
   const command = piBin ?? process.env.PI_THREADS_PI_BIN ?? "pi";
-  const child = spawn(command, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(command, ["--version"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: piWorkerEnv(),
+  });
   let output = "";
   let errorOutput = "";
   child.stdout.setEncoding("utf8");
@@ -224,6 +235,15 @@ export async function probePiVersion(piBin?: string, timeoutMs = 5_000): Promise
     throw new DaemonError("piRpcError", "Unable to run pi --version", { exitCode });
   }
   return (output || errorOutput).trim();
+}
+
+function piWorkerEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PI_OFFLINE: process.env.PI_OFFLINE ?? "1",
+    PI_SKIP_VERSION_CHECK: process.env.PI_SKIP_VERSION_CHECK ?? "1",
+    PI_TELEMETRY: process.env.PI_TELEMETRY ?? "0",
+  };
 }
 
 function validateCommand(command: unknown): asserts command is Record<string, unknown> {

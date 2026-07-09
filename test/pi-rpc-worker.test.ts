@@ -2,14 +2,26 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PiRpcWorker } from "../src/worker/pi-rpc-worker.ts";
+import {
+  DEFAULT_PI_VERSION_TIMEOUT_MS,
+  PiRpcWorker,
+  probePiVersion,
+} from "../src/worker/pi-rpc-worker.ts";
 
 const roots: string[] = [];
+const savedEnv = {
+  PI_OFFLINE: process.env.PI_OFFLINE,
+  PI_SKIP_VERSION_CHECK: process.env.PI_SKIP_VERSION_CHECK,
+  PI_TELEMETRY: process.env.PI_TELEMETRY,
+};
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+  restoreEnv("PI_OFFLINE", savedEnv.PI_OFFLINE);
+  restoreEnv("PI_SKIP_VERSION_CHECK", savedEnv.PI_SKIP_VERSION_CHECK);
+  restoreEnv("PI_TELEMETRY", savedEnv.PI_TELEMETRY);
 });
 
 describe("PiRpcWorker", () => {
@@ -57,19 +69,52 @@ describe("PiRpcWorker", () => {
     });
     await worker.stop();
   });
+
+  it("runs the version probe with offline update checks and telemetry disabled", async () => {
+    delete process.env.PI_OFFLINE;
+    delete process.env.PI_SKIP_VERSION_CHECK;
+    delete process.env.PI_TELEMETRY;
+    const { bin, envPath } = fakePiBin({ recordVersionEnv: true });
+
+    await expect(probePiVersion(bin)).resolves.toBe("0.75.5");
+
+    expect(JSON.parse(readFileSync(envPath!, "utf8"))).toEqual({
+      PI_OFFLINE: "1",
+      PI_SKIP_VERSION_CHECK: "1",
+      PI_TELEMETRY: "0",
+    });
+  });
+
+  it("uses a 15 second default pi version probe timeout", () => {
+    expect(DEFAULT_PI_VERSION_TIMEOUT_MS).toBe(15_000);
+  });
 });
 
-function fakePiBin(): { bin: string; logPath: string; root: string } {
+function fakePiBin(options: { recordVersionEnv?: boolean } = {}): {
+  bin: string;
+  envPath?: string;
+  logPath: string;
+  root: string;
+} {
   const root = mkdtempSync(join(tmpdir(), "pi-threads-rpc-worker-"));
   roots.push(root);
   const bin = join(root, "pi");
   const logPath = join(root, "commands.log");
+  const envPath = options.recordVersionEnv ? join(root, "version-env.json") : undefined;
   writeFileSync(
     bin,
     `#!/usr/bin/env node
 const fs = require("fs");
 const logPath = ${JSON.stringify(logPath)};
+const envPath = ${JSON.stringify(envPath)};
 if (process.argv.includes("--version")) {
+  if (envPath) {
+    fs.writeFileSync(envPath, JSON.stringify({
+      PI_OFFLINE: process.env.PI_OFFLINE,
+      PI_SKIP_VERSION_CHECK: process.env.PI_SKIP_VERSION_CHECK,
+      PI_TELEMETRY: process.env.PI_TELEMETRY,
+    }));
+  }
   console.log("0.75.5");
   process.exit(0);
 }
@@ -112,5 +157,13 @@ process.stdin.on("data", (chunk) => {
 `,
   );
   chmodSync(bin, 0o755);
-  return { bin, logPath, root };
+  return { bin, envPath, logPath, root };
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
 }
