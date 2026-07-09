@@ -11,6 +11,10 @@
 - Shell completion commands for bash, zsh, and fish.
 - `list` and `search` filters for `--since`, `--sort`, `--asc`, `--desc`, and `--cursor`.
 - Config-level `defaults.model` and `defaults.thinking` for new Pi sessions.
+- Verified standalone archives for Linux x86_64/arm64 and macOS x86_64/arm64,
+  with checksums and GitHub Release publishing.
+- Direct ownership guidance: use `pi-threads` exclusively while it controls a
+  session; native Pi must not access that same session concurrently.
 
 ### Changed
 

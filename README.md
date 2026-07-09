@@ -13,6 +13,24 @@ This repository is not a Pi modification. It starts external Pi RPC
 subprocesses, keeps daemon state in memory, and exposes Unix socket, stdio, and
 opt-in secured WebSocket JSON-RPC transports over one core service API.
 
+## How It Works
+
+`pi-threads` runs a long-lived daemon that manages a pool of Pi `--mode rpc`
+subprocesses. CLI commands connect to that daemon; it reserves a worker for the
+requested thread or starts one for a new session. A worker is leased to one
+active thread at a time, then returned to the idle pool or reaped.
+
+Pi remains the execution engine and owns the session JSONL. `pi-threads` adds
+only the in-memory scheduling, worker lifecycle, local transports, and
+thread-oriented control surface. Restarting the daemon drops that in-memory
+control state but does not remove existing Pi sessions.
+
+While `pi-threads` controls a thread, use `pi-threads` to interact with it. Do
+not start, resume, or otherwise use the same session with native Pi
+concurrently. Pi does not share a lock with this daemon, so concurrent native
+Pi access can race the worker and session state; stop the thread or daemon
+first.
+
 ## Features
 
 - JSON configuration for daemon worker limits, default model/thinking settings,
@@ -45,17 +63,19 @@ https://github.com/kcosr/pi-threads/releases
 
 Supported release platforms are currently:
 
-- `linux-x64`
+- `linux-x86_64`
+- `linux-arm64`
 - `macos-arm64`
-- `macos-x64`
+- `macos-x86_64`
 
-Install the extracted `pi-threads` binary somewhere on your `PATH`, for example
-`~/.local/bin`:
+Verify the archive against the accompanying `SHA256SUMS` file, extract it, and
+install the enclosed `pi-threads` binary somewhere on your `PATH`:
 
 ```bash
+tar -xzf pi-threads-<version>-linux-x86_64.tar.gz
 mkdir -p ~/.local/bin
-install -m 755 pi-threads ~/.local/bin/pi-threads
-pi-threads help
+install -m 755 pi-threads-<version>-linux-x86_64/pi-threads ~/.local/bin/pi-threads
+pi-threads --help
 ```
 
 `pi-threads` requires the Pi CLI/runtime separately. Ensure the `pi` executable
@@ -473,8 +493,8 @@ during the current process lifetime, it records session file size, mtime, and
 last-entry identity, then refuses later write-producing commands with
 `externalWriterDetected` if that baseline changed outside daemon-owned
 execution. Freshly discovered sessions do not have this protection until the
-daemon records a baseline. Direct Pi use still has a race window because Pi
-does not share a lock with this daemon.
+daemon records a baseline. This detection is not a coordination mechanism:
+never use native Pi concurrently with a thread controlled by `pi-threads`.
 
 ## Transports And Security
 
@@ -547,7 +567,7 @@ Build a standalone executable:
 
 ```bash
 bun run build:exe
-./bin/pi-threads help
+./bin/pi-threads --help
 ```
 
 To use that local build like a release binary, install it somewhere on your
@@ -589,77 +609,27 @@ node scripts/release.mjs major
 node scripts/release.mjs 0.2.3
 ```
 
-The script verifies a clean `main` branch, verifies upstream sync, optionally
-bumps `package.json`, refreshes `bun.lock`, runs `bun run verify`, commits
-`Release vX.Y.Z`, creates a matching git tag, and pushes the commit and tag.
-
-Release binaries are packaged separately after the platform binaries have been
-provided or built by the release operator. Build release binaries with:
-
-```bash
-bun run build:exe:linux-x64
-bun run build:exe:macos-arm64
-bun run build:exe:macos-x64
-```
-
-Expected archive names:
+The script verifies a clean, synchronized `main`, validates the source and
+both source and standalone-binary mock smokes, creates and pushes `vX.Y.Z`,
+builds all supported archives from the tag, verifies their contents and
+checksums, and publishes the GitHub Release. The generated archive layout is:
 
 ```text
-pi-threads-0.1.0-linux-x64.tar.gz
-pi-threads-0.1.0-macos-arm64.tar.gz
-pi-threads-0.1.0-macos-x64.tar.gz
+pi-threads-VERSION-PLATFORM/
+  pi-threads
+  README.md
+  LICENSE
+  CHANGELOG.md
+  config.example.json
+  smoke/README.md
+  docs/
 ```
-
-Each archive should contain one top-level directory named
-`pi-threads-VERSION-PLATFORM` with:
-
-- `pi-threads` - executable binary for that platform
-- `README.md`
-- `LICENSE`
-- `CHANGELOG.md`
-- `config.example.json`
-- `smoke/README.md`
-- `docs/`
-
-Example packaging flow for one platform:
-
-```bash
-VERSION=0.1.0
-PLATFORM=linux-x64
-BINARY=bin/release/pi-threads-linux-x64
-
-STAGE="$(mktemp -d)"
-ROOT="pi-threads-${VERSION}-${PLATFORM}"
-mkdir -p "$STAGE/$ROOT"
-install -m 755 "$BINARY" "$STAGE/$ROOT/pi-threads"
-cp README.md LICENSE CHANGELOG.md config.example.json "$STAGE/$ROOT/"
-mkdir -p "$STAGE/$ROOT/smoke"
-cp smoke/README.md "$STAGE/$ROOT/smoke/"
-cp -R docs "$STAGE/$ROOT/"
-tar -C "$STAGE" -czf "${ROOT}.tar.gz" "$ROOT"
-rm -rf "$STAGE"
-```
-
-Repeat that staging step for each platform. Create or update the GitHub release
-with notes from `CHANGELOG.md`, then upload the archives:
-
-```bash
-RELEASE_TAG="v${VERSION}"
-gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file /path/to/release-notes.md
-gh release upload "$RELEASE_TAG" \
-  "pi-threads-${VERSION}-linux-x64.tar.gz" \
-  "pi-threads-${VERSION}-macos-arm64.tar.gz" \
-  "pi-threads-${VERSION}-macos-x64.tar.gz"
-```
-
-Release notes should include the tested Pi version range and whether mock
-smoke, live real-model smoke, and parallel-worker smoke passed.
 
 ## Compatibility Matrix
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| 0.1.x | 0.75.5, 0.75.x protocol range | Initial supported range |
+| 0.1.x | 0.75.x through 0.80.x | Initial supported range |
 
 ## Known Limitations
 
@@ -667,8 +637,9 @@ smoke, live real-model smoke, and parallel-worker smoke passed.
   database, or transcript projection.
 - Active Pi work is not recovered after daemon restart; startup is a cold
   rescan of Pi session files.
-- External-writer detection is best-effort and cannot eliminate races with
-  direct Pi use.
+- Threads controlled by `pi-threads` must not be used through native Pi at the
+  same time. External-writer detection is best-effort and cannot prevent those
+  races.
 - Usage and provider attribution are best-effort and depend on the Pi
   RPC/session surfaces available in the supported version.
 - Raw TCP JSONL is not enabled; WebSocket is the TCP transport.

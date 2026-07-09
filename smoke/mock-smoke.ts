@@ -59,7 +59,11 @@ writeFileSync(
   }),
 );
 
-const daemon = spawn("bun", ["run", "src/index.ts", "--config", configPath, "daemon", "start"], {
+const standaloneBin = process.env.PI_THREADS_SMOKE_BIN;
+const command = standaloneBin ? standaloneBin : "bun";
+const entryArgs = standaloneBin ? [] : ["run", "src/index.ts"];
+
+const daemon = spawn(command, [...entryArgs, "--config", configPath, "daemon", "start"], {
   env: { ...process.env, PI_THREADS_PI_BIN: bin },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -80,7 +84,7 @@ try {
     5_000,
     () => `daemon stdout:\n${daemonStdout}\ndaemon stderr:\n${daemonStderr}`,
   );
-  const base = ["run", "src/index.ts", "--config", configPath, "--connect", `unix://${socket}`];
+  const base = [...entryArgs, "--config", configPath, "--connect", `unix://${socket}`];
   await cli([...base, "servers", "ping"]);
   const started = await cli([
     ...base,
@@ -110,7 +114,7 @@ try {
 }
 
 async function cli(args: string[]): Promise<string> {
-  const child = spawn("bun", args, { env: { ...process.env, PI_THREADS_PI_BIN: bin } });
+  const child = spawn(command, args, { env: { ...process.env, PI_THREADS_PI_BIN: bin } });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -123,7 +127,7 @@ async function cli(args: string[]): Promise<string> {
   });
   const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
   if (code !== 0) {
-    throw new Error(`command failed: bun ${args.join(" ")}\\n${stderr}`);
+    throw new Error(`command failed: ${command} ${args.join(" ")}\\n${stderr}`);
   }
   return stdout;
 }

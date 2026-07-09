@@ -13,6 +13,11 @@ This project is not a Pi modification. It is an external TypeScript/Bun tool
 that spawns `pi --mode rpc` subprocesses, adapts their protocol, and exposes a
 daemon API plus a CLI named `pi-threads`.
 
+The daemon is the thread owner while it controls a session. Native Pi must not
+start, resume, or otherwise use that same session concurrently: Pi does not
+share a lock with `pi-threads`, and external-writer detection is only a
+best-effort safety check rather than a coordination protocol.
+
 The design goal is parity in shape and operational discipline with
 `codex-threads` and `t3code-threads`, adapted to Pi's actual worker/session
 model. CLI and transport adapters stay thin. Core service logic owns scheduling,
@@ -35,8 +40,8 @@ Pi-specific behavior.
   output, and shell completions.
 - Keep live smoke opt-in, but make real live smoke exercise real Pi/model turns
   rather than duplicating fake-worker coverage.
-- Ship as Bun-built standalone binaries for Linux x64, macOS arm64, and macOS
-  x64, with release archives documented.
+- Ship as Bun-built standalone binaries for Linux x86_64/arm64 and macOS
+  x86_64/arm64, with verified release archives.
 
 ## Non-Goals
 
@@ -84,14 +89,16 @@ Recommended scripts:
   "lint": "biome lint --error-on-warnings .",
   "test": "vitest run",
   "check": "bun run typecheck && bun run lint && bun run test",
-  "build": "bun build src/index.ts --target=bun --outfile=dist/pi-threads.bundle.js",
-  "build:exe": "mkdir -p bin && bun build src/index.ts --compile --outfile=bin/pi-threads",
-  "build:exe:linux-x64": "mkdir -p bin/release && bun build src/index.ts --compile --target=bun-linux-x64 --outfile=bin/release/pi-threads-linux-x64",
-  "build:exe:macos-arm64": "mkdir -p bin/release && bun build src/index.ts --compile --target=bun-darwin-arm64 --outfile=bin/release/pi-threads-macos-arm64",
-  "build:exe:macos-x64": "mkdir -p bin/release && bun build src/index.ts --compile --target=bun-darwin-x64 --outfile=bin/release/pi-threads-macos-x64",
+  "build": "node scripts/build-bun.mjs --bundle --outfile dist/pi-threads.bundle.js",
+  "build:exe": "node scripts/build-bun.mjs --outfile bin/pi-threads",
+  "build:exe:linux-x86_64": "node scripts/build-bun.mjs --target bun-linux-x64 --outfile bin/release/pi-threads-linux-x86_64",
+  "build:exe:linux-arm64": "node scripts/build-bun.mjs --target bun-linux-arm64 --outfile bin/release/pi-threads-linux-arm64",
+  "build:exe:macos-arm64": "node scripts/build-bun.mjs --target bun-darwin-arm64 --outfile bin/release/pi-threads-macos-arm64",
+  "build:exe:macos-x86_64": "node scripts/build-bun.mjs --target bun-darwin-x64 --outfile bin/release/pi-threads-macos-x86_64",
   "smoke:mock": "bun run smoke/mock-smoke.ts",
   "smoke:live": "bash smoke/live-smoke.sh",
-  "verify": "bun run check && bun run smoke:mock && bun run build && bun run build:exe",
+  "verify": "bun run check && bun run smoke:mock && bun run build && bun run build:exe && PI_THREADS_SMOKE_BIN=./bin/pi-threads bun run smoke:mock",
+  "package:release": "node scripts/package-release.mjs",
   "release": "node scripts/release.mjs"
 }
 ```
@@ -99,9 +106,10 @@ Recommended scripts:
 Release archives use these names:
 
 ```text
-pi-threads-VERSION-linux-x64.tar.gz
+pi-threads-VERSION-linux-x86_64.tar.gz
+pi-threads-VERSION-linux-arm64.tar.gz
 pi-threads-VERSION-macos-arm64.tar.gz
-pi-threads-VERSION-macos-x64.tar.gz
+pi-threads-VERSION-macos-x86_64.tar.gz
 ```
 
 Each archive contains a top-level `pi-threads-VERSION-PLATFORM` directory with:
@@ -114,11 +122,11 @@ Each archive contains a top-level `pi-threads-VERSION-PLATFORM` directory with:
 - `smoke/README.md`
 - `docs/`
 
-The release script verifies a clean synced `main`, optionally bumps
-`package.json`, refreshes `bun.lock`, runs `bun run verify`, commits
-`Release vX.Y.Z`, creates a matching tag, and pushes commit plus tag. Creating
-the GitHub release object and uploading platform archives are explicit release
-operator steps.
+The release script verifies a clean synced `main`, optionally bumps the
+package and runtime versions, runs `bun run verify`, commits and tags
+`Release vX.Y.Z`, builds and validates every archive from that tag, generates
+checksums, and creates the GitHub release before preparing the next
+`[Unreleased]` section.
 
 ## Repository Layout
 
@@ -801,7 +809,7 @@ Current compatibility target:
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| 0.1.x | 0.75.5, 0.75.x protocol range | Initial supported range |
+| 0.1.x | 0.75.x through 0.80.x | Initial supported range |
 
 Worker assignment refuses unsupported `pi --version` values.
 
@@ -859,8 +867,8 @@ Pi event names used:
 - Active Pi work is not recovered after daemon restart.
 - Daemon `turnId` values are in-memory only.
 - External-writer detection is best-effort and process-lifetime scoped.
-- Direct Pi use can still race daemon-owned workers because Pi does not share a
-  lock with `pi-threads`.
+- Native Pi must not use a daemon-owned session concurrently because Pi does
+  not share a lock with `pi-threads`.
 - Usage/account data is best-effort and depends on Pi RPC/session surfaces.
 - `daemon.tcp.tls.ca` does not implement mTLS today.
 - WebSocket `allowedOrigins` protects browser clients only; non-browser clients

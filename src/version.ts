@@ -1,4 +1,8 @@
-export const VERSION = "0.1.0";
+declare const __PI_THREADS_VERSION__: string | undefined;
+
+export const PACKAGE_VERSION = "0.1.0";
+export const VERSION =
+  typeof __PI_THREADS_VERSION__ === "string" ? __PI_THREADS_VERSION__ : PACKAGE_VERSION;
 
 export const PI_COMPATIBILITY = {
   testedRange: "0.75.x - 0.80.x",
