@@ -19,6 +19,9 @@
 - Default `new` and `send` waits no longer print raw daemon event lines; explicit `--stream` keeps filtered event progress.
 - `--server` aliases now inherit configured bearer auth and TLS CA settings.
 - `server/status` now reports active daemon transport names.
+- Pi session catalog now reads session JSONL directly without importing the Pi runtime, and supports Pi versions 0.75.x through 0.80.x. ([#1](https://github.com/kcosr/pi-threads/pull/1))
+- Pi worker startup now gives `pi --version` up to 15 seconds and disables Pi startup network checks for version probes and RPC workers unless explicitly overridden. ([#1](https://github.com/kcosr/pi-threads/pull/1))
+- Provider-prefixed model names now resolve against Pi's available-model catalog. ([#1](https://github.com/kcosr/pi-threads/pull/1))
 
 ### Fixed
 

@@ -60,7 +60,10 @@ pi-threads help
 
 `pi-threads` requires the Pi CLI/runtime separately. Ensure the `pi` executable
 is on `PATH`, or set `PI_THREADS_PI_BIN=/path/to/pi` for daemon and smoke
-commands.
+commands. Worker startup probes `pi --version` with a 15 second timeout and
+sets Pi's startup network opt-outs for the probe and RPC workers
+(`PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`) unless those
+environment variables are already set.
 
 For unsupported platforms or local development, build from source in the
 Development section near the end of this document.
