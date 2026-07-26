@@ -44,7 +44,7 @@ not create daemon-owned metadata stores.
 | Config path and endpoint selection | `--config`, `--connect`, and `--server` are implemented. `--connect` overrides server aliases. |
 | Server aliases | `servers.*.endpoint`, `authToken`, `authTokenEnv`, and `tlsCa` are inherited by `--server ALIAS`; explicit CLI flags override alias auth/CA. |
 | Model default | `defaults.model` initializes new Pi sessions when `new` omits `--model`. Values may be `provider/modelId` or a configured Pi model id/name. |
-| Reasoning/thinking default | `defaults.thinking` initializes new Pi sessions when `new` omits `--thinking`; allowed values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. |
+| Reasoning/thinking default | `defaults.thinking` initializes new Pi sessions when `new` omits `--thinking`; allowed values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. |
 | Existing-thread sends | Match reference behavior by inheriting the existing thread's settings unless `send --model` or `send --thinking` is explicit. |
 | Worker lifecycle | `minWorkers`, `maxWorkers`, and `idleTtlMs` are implemented and validated. |
 | Transport security | Unix, stdio daemon mode, and opt-in WebSocket are implemented. Non-loopback WebSocket requires TLS and bearer auth. |

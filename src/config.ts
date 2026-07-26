@@ -68,7 +68,7 @@ export function defaultConfig(): PiThreadsConfig {
   };
 }
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export function loadConfig(path?: string): PiThreadsConfig {
   const configPath = path ? resolve(path) : defaultConfigPath();

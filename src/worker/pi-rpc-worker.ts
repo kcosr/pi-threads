@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { DaemonError } from "../errors.ts";
-import { isSupportedPiVersion } from "../version.ts";
+import { isSupportedPiVersion, PI_COMPATIBILITY } from "../version.ts";
 
 export const DEFAULT_PI_VERSION_TIMEOUT_MS = 15_000;
 
@@ -68,7 +68,7 @@ export class PiRpcWorker extends EventEmitter {
     if (!isSupportedPiVersion(this.version)) {
       throw new DaemonError("piRpcError", "Unsupported pi version", {
         version: this.version,
-        supported: "0.75.x - 0.80.x",
+        supported: PI_COMPATIBILITY.testedRange,
       });
     }
     const piBin = this.options.piBin ?? process.env.PI_THREADS_PI_BIN ?? "pi";

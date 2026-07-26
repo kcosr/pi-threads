@@ -50,4 +50,13 @@ describe("config", () => {
 
     expect(() => loadConfig(path)).toThrow(/defaults\.thinking/);
   });
+
+  it("accepts Pi's max thinking level", () => {
+    const dir = join(tmpdir(), `pi-threads-config-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ defaults: { thinking: "max" } }));
+
+    expect(loadConfig(path).defaults.thinking).toBe("max");
+  });
 });

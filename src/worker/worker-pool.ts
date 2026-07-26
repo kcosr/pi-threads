@@ -1,5 +1,6 @@
 import { DaemonError } from "../errors.ts";
 import type { EventBus } from "../service/event-bus.ts";
+import { usesAgentSettledEvent } from "../version.ts";
 import { PiRpcWorker, type PiRpcResponse, type WorkerProcessState } from "./pi-rpc-worker.ts";
 
 export interface WorkerPoolOptions {
@@ -219,6 +220,14 @@ export class WorkerPool {
   }
 }
 
+const pendingSettledOutcomes = new WeakMap<
+  PooledWorker,
+  {
+    piEvent: Record<string, unknown>;
+    failure?: ReturnType<typeof agentFailure>;
+  }
+>();
+
 function mapWorkerEvent(worker: PooledWorker, event: unknown) {
   const raw = event as Record<string, unknown>;
   const type = String(raw.type ?? "");
@@ -251,6 +260,20 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
     };
   }
   if (type === "agent_end") {
+    const failure = agentFailure(raw);
+    if (usesAgentSettledEvent(worker.version)) {
+      pendingSettledOutcomes.set(worker, { piEvent: raw, failure });
+      return {
+        type: "thread.updated" as const,
+        workerId: worker.workerId,
+        threadId: worker.threadId,
+        turnId: worker.activeTurnId,
+        payload: {
+          piEvent: raw,
+          status: raw.willRetry === true ? "retrying" : "settling",
+        },
+      };
+    }
     if (raw.willRetry === true) {
       return {
         type: "thread.updated" as const,
@@ -261,7 +284,6 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
       };
     }
     worker.state = "assigned";
-    const failure = agentFailure(raw);
     if (failure) {
       return {
         type: "turn.failed" as const,
@@ -277,6 +299,36 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
       payload: { piEvent: raw, status: "completed" },
+    };
+  }
+  if (type === "agent_settled" && usesAgentSettledEvent(worker.version)) {
+    worker.state = "assigned";
+    const outcome = pendingSettledOutcomes.get(worker);
+    pendingSettledOutcomes.delete(worker);
+    if (outcome?.failure) {
+      return {
+        type: "turn.failed" as const,
+        workerId: worker.workerId,
+        threadId: worker.threadId,
+        turnId: worker.activeTurnId,
+        payload: {
+          piEvent: outcome.piEvent,
+          settledPiEvent: raw,
+          status: "failed",
+          ...outcome.failure,
+        },
+      };
+    }
+    return {
+      type: "turn.completed" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: {
+        piEvent: raw,
+        ...(outcome ? { agentEndPiEvent: outcome.piEvent } : {}),
+        status: "completed",
+      },
     };
   }
   if (type === "auto_retry_start") {
@@ -388,9 +440,9 @@ function assertNotCancelled(response: PiRpcResponse, command: string): void {
   }
 }
 
-function agentFailure(raw: Record<string, unknown>):
-  | { errorCode: "piRpcError"; message: string; stopReason?: string }
-  | undefined {
+function agentFailure(
+  raw: Record<string, unknown>,
+): { errorCode: "piRpcError"; message: string; stopReason?: string } | undefined {
   const messages = Array.isArray(raw.messages) ? raw.messages : [];
   const failed = messages
     .map((message) => (message && typeof message === "object" ? message : undefined))

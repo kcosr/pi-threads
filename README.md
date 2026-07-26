@@ -329,7 +329,7 @@ Follow-up `send` commands keep the thread's current Pi settings unless
 
 `defaults.model` accepts either `provider/modelId` or a model id/name that can
 be resolved from Pi's model list. Accepted thinking levels are `off`,
-`minimal`, `low`, `medium`, `high`, and `xhigh`.
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 ## Commands
 
@@ -629,7 +629,7 @@ pi-threads-VERSION-PLATFORM/
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| 0.1.x | 0.75.x through 0.80.x | Initial supported range |
+| 0.1.x | 0.75.x through 0.82.x | Current supported range |
 
 ## Known Limitations
 

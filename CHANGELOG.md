@@ -2,7 +2,30 @@
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- Added Pi's `max` thinking level to configuration and CLI validation.
+  ([#2](https://github.com/kcosr/pi-threads/pull/2))
+
+### Changed
+
+- Extended worker compatibility through Pi 0.82.x and updated the pinned Pi
+  protocol/runtime dependency to 0.82.1.
+  ([#2](https://github.com/kcosr/pi-threads/pull/2))
+
+### Fixed
+
+- Compiled clients now apply configured `tlsCa` files through an HTTPS agent,
+  preserving per-server private CA trust for `wss://` aliases under Bun.
+  ([#2](https://github.com/kcosr/pi-threads/pull/2))
+- WebSocket Origin validation now treats an empty `allowedOrigins` list as
+  browser-deny-by-default while continuing to allow non-browser clients that
+  send no Origin header.
+  ([#2](https://github.com/kcosr/pi-threads/pull/2))
+- Pi 0.81 and newer workers now wait for `agent_settled` before completing or
+  releasing a daemon turn, so retries, compaction retries, and queued
+  continuations retain thread ownership until Pi is fully settled.
+  ([#2](https://github.com/kcosr/pi-threads/pull/2))
 
 ## [0.1.0] - 2026-07-09
 
