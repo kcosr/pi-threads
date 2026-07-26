@@ -18,9 +18,12 @@ describe("security helpers", () => {
     expect(() => assertOriginAllowed(["https://example.test"], "https://other.test")).toThrow(
       DaemonError,
     );
+    expect(() => assertOriginAllowed([], "https://example.test")).toThrow(DaemonError);
+    expect(() => assertOriginAllowed(undefined, "https://example.test")).toThrow(DaemonError);
     expect(() =>
       assertOriginAllowed(["https://example.test"], "https://example.test"),
     ).not.toThrow();
+    expect(() => assertOriginAllowed([], undefined)).not.toThrow();
   });
 
   it("requires TLS on non-loopback binds", () => {

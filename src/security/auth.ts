@@ -44,10 +44,10 @@ export function assertAuthConfiguredForBind(host: string, config: AuthConfig): v
 }
 
 export function assertOriginAllowed(allowedOrigins: string[] | undefined, origin?: string): void {
-  if (!allowedOrigins || allowedOrigins.length === 0 || !origin) {
+  if (!origin) {
     return;
   }
-  if (!allowedOrigins.includes(origin)) {
+  if (!allowedOrigins?.includes(origin)) {
     throw new DaemonError("forbidden", "WebSocket Origin rejected", { origin });
   }
 }

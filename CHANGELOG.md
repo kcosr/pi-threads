@@ -13,6 +13,11 @@
 
 ### Fixed
 
+- Compiled clients now apply configured `tlsCa` files through an HTTPS agent,
+  preserving per-server private CA trust for `wss://` aliases under Bun.
+- WebSocket Origin validation now treats an empty `allowedOrigins` list as
+  browser-deny-by-default while continuing to allow non-browser clients that
+  send no Origin header.
 - Pi 0.81 and newer workers now wait for `agent_settled` before completing or
   releasing a daemon turn, so retries, compaction retries, and queued
   continuations retain thread ownership until Pi is fully settled.
