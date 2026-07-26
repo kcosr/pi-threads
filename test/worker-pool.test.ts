@@ -188,17 +188,91 @@ describe("WorkerPool lifecycle", () => {
     });
     await pool.stopAll();
   });
+
+  it("waits for agent_settled before completing Pi 0.81 and newer turns", async () => {
+    const events = new EventBus();
+    const observed: DaemonEvent[] = [];
+    events.subscribe({}, (event) => observed.push(event));
+    const pool = new WorkerPool(
+      {
+        minWorkers: 0,
+        maxWorkers: 1,
+        idleTtlMs: 300_000,
+        workerFactory: fakeWorkerFactory("0.82.1"),
+      },
+      events,
+    );
+
+    const worker = await pool.acquireForNew("/tmp/project");
+    worker.threadId = "thread-1";
+    worker.activeTurnId = "turn-1";
+    worker.state = "running";
+    (worker as FakeWorker).emitEvent({
+      type: "agent_end",
+      willRetry: true,
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "retry me" }],
+    });
+    (worker as FakeWorker).emitEvent({
+      type: "agent_end",
+      willRetry: false,
+      messages: [{ role: "assistant", stopReason: "stop" }],
+    });
+
+    expect(observed.map((event) => event.type)).not.toContain("turn.completed");
+    expect(worker.state).toBe("running");
+
+    (worker as FakeWorker).emitEvent({ type: "agent_settled" });
+
+    expect(observed.at(-1)?.type).toBe("turn.completed");
+    expect(worker.state).toBe("assigned");
+    await pool.stopAll();
+  });
+
+  it("defers Pi 0.81 and newer failures until agent_settled", async () => {
+    const events = new EventBus();
+    const observed: DaemonEvent[] = [];
+    events.subscribe({}, (event) => observed.push(event));
+    const pool = new WorkerPool(
+      {
+        minWorkers: 0,
+        maxWorkers: 1,
+        idleTtlMs: 300_000,
+        workerFactory: fakeWorkerFactory("0.82.1"),
+      },
+      events,
+    );
+
+    const worker = await pool.acquireForNew("/tmp/project");
+    worker.threadId = "thread-1";
+    worker.activeTurnId = "turn-1";
+    worker.state = "running";
+    (worker as FakeWorker).emitEvent({
+      type: "agent_end",
+      willRetry: false,
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "failed" }],
+    });
+
+    expect(observed.map((event) => event.type)).not.toContain("turn.failed");
+
+    (worker as FakeWorker).emitEvent({ type: "agent_settled" });
+
+    expect(observed.at(-1)).toMatchObject({
+      type: "turn.failed",
+      payload: { message: "failed", stopReason: "error" },
+    });
+    await pool.stopAll();
+  });
 });
 
-function fakeWorkerFactory(): NonNullable<
-  ConstructorParameters<typeof WorkerPool>[0]["workerFactory"]
-> {
-  return ({ workerId, cwd }) => new FakeWorker(workerId, cwd);
+function fakeWorkerFactory(
+  version = "0.75.5",
+): NonNullable<ConstructorParameters<typeof WorkerPool>[0]["workerFactory"]> {
+  return ({ workerId, cwd }) => new FakeWorker(workerId, cwd, version);
 }
 
 class FakeWorker {
   readonly startedAt = new Date();
-  version = "0.75.5";
+  version: string;
   state: PooledWorker["state"] = "starting";
   threadId: string | undefined;
   activeTurnId: string | undefined;
@@ -210,7 +284,10 @@ class FakeWorker {
   constructor(
     readonly workerId: string,
     readonly cwd: string,
-  ) {}
+    version = "0.75.5",
+  ) {
+    this.version = version;
+  }
 
   async start(): Promise<void> {
     this.state = "idle";

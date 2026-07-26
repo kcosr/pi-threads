@@ -11,7 +11,7 @@ Environment flags:
 - `PI_THREADS_AUTH_TOKEN_ENV`: reserved for future TCP/WebSocket smoke.
 - `PI_THREADS_TLS_CA`: reserved for future `wss://` smoke.
 - `PI_THREADS_MODEL`: optional model selector. Use `provider/modelId` for an exact Pi RPC `set_model`, or a configured Pi model id that can be resolved from `get_available_models`.
-- `PI_THREADS_THINKING`: optional thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`.
+- `PI_THREADS_THINKING`: optional thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
 Current live smoke always runs real model turns and includes abort coverage. `RUN_PI_BASH=1`, `RUN_PI_FORK=1`, and `RUN_PI_EXTERNAL_WRITER=1` are design-era optional paths that are not wired into the current script; see `docs/config-option-implementation-audit.md`.
 

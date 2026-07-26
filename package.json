@@ -33,7 +33,7 @@
     "release": "node scripts/release.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.75.5",
+    "@earendil-works/pi-coding-agent": "0.82.1",
     "commander": "15.0.0",
     "ws": "8.21.0"
   },

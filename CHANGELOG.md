@@ -2,7 +2,20 @@
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- Added Pi's `max` thinking level to configuration and CLI validation.
+
+### Changed
+
+- Extended worker compatibility through Pi 0.82.x and updated the pinned Pi
+  protocol/runtime dependency to 0.82.1.
+
+### Fixed
+
+- Pi 0.81 and newer workers now wait for `agent_settled` before completing or
+  releasing a daemon turn, so retries, compaction retries, and queued
+  continuations retain thread ownership until Pi is fully settled.
 
 ## [0.1.0] - 2026-07-09
 
