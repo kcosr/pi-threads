@@ -13,6 +13,15 @@
 
 ### Added
 
+- Add `daemon.worker.reuseAcrossThreads` (default `true`); setting it to `false`
+  keeps each worker process bound to one thread while preserving same-thread
+  follow-ups and resuming evicted sessions in their recorded working directory.
+  Pi's in-place `fork` and `clone` commands require cross-thread reuse and fail
+  with `invalidParams` when it is disabled.
+- Evict the least recently used eligible idle worker when a request needs pool
+  capacity, including when timed reaping is disabled. Active turns, commands,
+  and reservations remain protected.
+
 - Add HTTP(S) client endpoints, owned async event/turn streams, and CLI wait/stream
   parity across Unix, WebSocket and HTTP. Private CA trust applies to HTTPS too.
 - Exercise source and compiled CLI transport parity and optional TLS in mock smoke;
@@ -33,6 +42,9 @@
 
 ### Changed
 
+- Require workers to launch in the session's saved cwd when resuming an unloaded
+  session, in either reuse mode.
+
 - `--no-wait` takes precedence over `--stream`; promptless `new` returns acceptance
   without opening an event subscription. Correct the documented blocking JSON
   output to acceptance followed by a wait, without a final-text aggregate.
@@ -40,6 +52,11 @@
 - Update the pinned Pi protocol/runtime dependency to 1.0.0.
 
 ### Fixed
+
+- Protect unsaved Pi sessions from worker reuse and idle eviction. Promptless
+  sessions and extension-handled input keep their worker until Pi saves a
+  transcript; missing-file resumption fails explicitly instead of silently
+  creating a different session.
 
 - Report the HTTP status when a proxy returns a non-JSON error page.
 - Closing a client or turn stream releases sockets even during connection or

@@ -40,6 +40,7 @@ describe("config", () => {
     expect(config.defaults).toEqual({ model: "mock/default", thinking: "high" });
     expect(config.daemon.worker.maxWorkers).toBe(2);
     expect(config.daemon.worker.minWorkers).toBe(0);
+    expect(config.daemon.worker.reuseAcrossThreads).toBe(true);
     expect(resolveEndpoint({ config, server: "tcp" })).toBe("ws://127.0.0.1:9999");
     expect(resolveClientConfig({ config, server: "tcp" })).toEqual({
       endpoint: "ws://127.0.0.1:9999",
@@ -83,6 +84,24 @@ describe("config", () => {
   ])("rejects invalid numeric worker config %s=%s", (key, value) => {
     const path = writeConfig({ daemon: { worker: { [key]: value } } });
     expect(() => loadConfig(path)).toThrow(`daemon.worker.${key}`);
+  });
+
+  it.each([true, false])("accepts reuseAcrossThreads=%s", (reuseAcrossThreads) => {
+    const path = writeConfig({ daemon: { worker: { reuseAcrossThreads } } });
+    expect(loadConfig(path).daemon.worker.reuseAcrossThreads).toBe(reuseAcrossThreads);
+  });
+
+  it.each([
+    "true",
+    "false",
+    0,
+    1,
+    null,
+    [],
+    {},
+  ])("rejects a non-boolean reuseAcrossThreads=%j", (reuseAcrossThreads) => {
+    const path = writeConfig({ daemon: { worker: { reuseAcrossThreads } } });
+    expect(() => loadConfig(path)).toThrow("daemon.worker.reuseAcrossThreads must be a boolean");
   });
 
   it.each(["", null, 0])("rejects an invalid default thinking level %s", (thinking) => {

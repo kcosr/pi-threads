@@ -112,6 +112,11 @@ export class PiSessionCatalog {
     return baseline;
   }
 
+  isPersisted(threadId: string): boolean {
+    const session = this.byId.get(threadId);
+    return session !== undefined && existsSync(session.path);
+  }
+
   assertUnchanged(threadId: string): void {
     const baseline = this.baselines.get(threadId);
     if (!baseline) {

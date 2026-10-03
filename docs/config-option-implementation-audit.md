@@ -12,9 +12,10 @@ other storage outside the project design.
 | Parameter or option | Current status |
 | --- | --- |
 | `daemon.unixSocket` | Used by daemon startup and Unix JSON-RPC listener. |
-| `daemon.worker.maxWorkers` | Enforced by `WorkerPool`; excess requests fail with `capacity`. |
-| `daemon.worker.minWorkers` | Prewarms and maintains a minimum total worker count. |
-| `daemon.worker.idleTtlMs` | Reaps idle or assigned non-running workers down to `minWorkers`. |
+| `daemon.worker.maxWorkers` | Enforced by `WorkerPool`; evicts the least recently used eligible idle worker when capacity is needed. Fails with `capacity` when no worker is eligible. |
+| `daemon.worker.minWorkers` | Maintains a minimum total worker count; prewarmed workers start in the daemon cwd. Does not prevent replacement for capacity. |
+| `daemon.worker.idleTtlMs` | Reaps eligible idle workers down to `minWorkers`; `0` disables timed reaping. Active turns, commands, and reservations are protected. |
+| `daemon.worker.reuseAcrossThreads` | Boolean, default `true`. When `false`, each worker serves one thread for its lifetime; evicted threads resume in a fresh worker in the saved cwd. In-place `fork` and `clone` fail with `invalidParams`. |
 | `daemon.tcp.enabled`, `bind`, `port` | Starts the shared optional HTTP/SSE and WebSocket listener. |
 | `daemon.tcp.authToken`, `authTokenEnv` | Enforced on HTTP requests and WebSocket connections when configured. |
 | `daemon.tcp.allowedOrigins` | Enforced for HTTP/WebSocket requests that include `Origin`; allowed HTTP origins receive CORS preflight support. |

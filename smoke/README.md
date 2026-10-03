@@ -10,8 +10,29 @@ schema, settings and shell mutations, compaction, follow-up disposition, abort,
 failure, and recovery after killing a fixture worker. It makes no provider calls
 and is included in `bun run verify`. Run `bun install` first.
 
+This real-Pi smoke uses `reuseAcrossThreads: false` with `maxWorkers: 1`. It
+checks that active work returns `capacity`, an idle worker can be evicted for a
+thread in another directory, the original thread resumes in its saved cwd, and
+subsequent turns keep using that thread's worker.
+
 The unit lifecycle suite also covers metadata-refresh failures after both
 successful and failed session mutations, ensuring their original outcomes survive.
+
+Worker lifecycle tests cover `daemon.worker.reuseAcrossThreads: false`,
+same-thread follow-ups, session resumption in the saved cwd, and eviction of
+eligible idle workers under capacity pressure. Active turns, commands, and
+reservations must remain protected. Timed reaping still respects `minWorkers`,
+while capacity-driven replacement also works with `idleTtlMs: 0`. These checks
+use fixtures and do not call a model provider. For workloads that create one
+directory per thread, use `minWorkers: 0` so workers start in the requested cwd.
+With cross-thread reuse disabled, `fork` and `clone` must fail before issuing a
+Pi command because they replace the current worker's session.
+
+Service regressions exercise unsaved promptless sessions in both reuse modes:
+their workers remain available to the same thread and cannot be reused or
+evicted until Pi saves the transcript. Missing-file resumption after a crash
+must fail before allocating another worker. Pool tests cover the same
+protection during timed reaping.
 
 `smoke:live` is opt-in and targets real `pi --mode rpc` workers with real model turns. It uses disposable directories and validates daemon startup, model discovery, `new`, `send`, `status`, `messages`, `steer`, `abort`, cwd-specific worker assignment, and concurrent multi-worker execution.
 

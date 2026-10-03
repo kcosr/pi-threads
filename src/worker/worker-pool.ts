@@ -6,6 +6,8 @@ export interface WorkerPoolOptions {
   minWorkers: number;
   maxWorkers: number;
   idleTtlMs: number;
+  reuseAcrossThreads?: boolean;
+  canReclaim?: (worker: PooledWorker) => boolean;
   piBin?: string;
   prewarmCwd?: string;
   reapIntervalMs?: number;
@@ -23,6 +25,7 @@ export interface PooledWorker {
   abortingTurnId?: string;
   lastUsedAt: Date;
   pid: number | undefined;
+  readonly pendingCommandCount?: number;
   start(): Promise<void>;
   command(command: Record<string, unknown>, timeoutMs?: number): Promise<PiRpcResponse>;
   getState(): Promise<Record<string, unknown>>;
@@ -39,6 +42,10 @@ export class WorkerPool {
   private stopped = false;
   private recoveryTimer: NodeJS.Timeout | undefined;
   private recoveryDelayMs = 1_000;
+  private lifecycle: Promise<void> = Promise.resolve();
+  private readonly reservations = new WeakMap<PooledWorker, number>();
+  private readonly claimed = new WeakSet<PooledWorker>();
+  private readonly retiring = new WeakSet<PooledWorker>();
 
   constructor(
     private readonly options: WorkerPoolOptions,
@@ -56,10 +63,17 @@ export class WorkerPool {
 
   async start(): Promise<void> {
     this.stopped = false;
-    await this.maintainMinimum();
+    await this.withLifecycle(() => this.maintainMinimum());
     if (this.options.idleTtlMs > 0 || this.options.minWorkers > 0) {
       this.reaper = setInterval(
-        () => void this.reapIdleWorkers(),
+        () => {
+          void this.withLifecycle(() => this.reapIdleWorkers()).catch((error) => {
+            this.events.emit({
+              type: "worker.crashed",
+              payload: { message: error instanceof Error ? error.message : String(error) },
+            });
+          });
+        },
         this.options.reapIntervalMs ??
           Math.min(Math.max(this.options.idleTtlMs / 2, 1_000), 60_000),
       );
@@ -89,16 +103,17 @@ export class WorkerPool {
   }
 
   findByThread(threadId: string): PooledWorker | undefined {
-    return [...this.workers.values()].find((worker) => worker.threadId === threadId);
+    return [...this.workers.values()].find(
+      (worker) =>
+        worker.threadId === threadId && !this.retiring.has(worker) && !isUnavailableWorker(worker),
+    );
   }
 
   async acquireForNew(cwd: string): Promise<PooledWorker> {
-    const idle = [...this.workers.values()].find(
-      (worker) => worker.state === "idle" && worker.cwd === cwd && !worker.threadId,
-    );
-    const worker = idle ?? (await this.spawn(cwd));
-    worker.state = "assigned";
-    return worker;
+    return this.withLifecycle(async () => {
+      this.assertRunning();
+      return this.selectWorker(cwd);
+    });
   }
 
   async acquireForSession(
@@ -106,47 +121,165 @@ export class WorkerPool {
     cwd: string,
     sessionPath: string,
   ): Promise<PooledWorker> {
-    const assigned = this.findByThread(threadId);
-    if (assigned) {
-      if (assigned.state === "running") {
-        throw new DaemonError("busy", "Thread already has an active daemon turn", { threadId });
+    return this.withLifecycle(async () => {
+      this.assertRunning();
+      const assigned = this.findByThread(threadId);
+      if (assigned) {
+        if (!this.isQuiescent(assigned)) {
+          throw new DaemonError("busy", "Thread already has an active daemon operation", {
+            threadId,
+          });
+        }
+        if (assigned.cwd === cwd) {
+          this.retain(assigned);
+          return assigned;
+        }
+        if (!this.isReclaimable(assigned)) {
+          throw new DaemonError(
+            "capacity",
+            "Thread session is not persisted; cannot replace its worker for another workspace",
+            {
+              threadId,
+            },
+          );
+        }
+        await this.retire(assigned);
+        this.scheduleMinimumRecovery();
       }
-      return assigned;
-    }
-    const idle =
-      [...this.workers.values()].find((worker) => worker.state === "idle" && worker.cwd === cwd) ??
-      [...this.workers.values()].find((worker) => worker.state === "idle" && !worker.threadId);
-    const worker = idle ?? (await this.spawn(cwd));
-    if (worker.threadId !== threadId) {
-      const previousThreadId = worker.threadId;
-      worker.state = "assigned";
-      worker.threadId = threadId;
+      const worker = await this.selectWorker(cwd);
       try {
         const response = await worker.command({ type: "switch_session", sessionPath });
         assertNotCancelled(response, "switch_session");
+        const state = await worker.getState();
+        if (state.sessionId !== threadId) {
+          throw new DaemonError("piRpcError", "Pi resumed a different session than requested", {
+            threadId,
+            sessionId: state.sessionId,
+            sessionPath,
+          });
+        }
+        worker.threadId = threadId;
       } catch (error) {
-        worker.threadId = previousThreadId;
+        // A failed switch may have partially changed Pi's session. Never reuse it.
+        this.release(worker);
         if (!isUnavailableWorker(worker)) {
-          worker.state = previousThreadId ? "assigned" : "idle";
+          await this.retire(worker);
+          this.scheduleMinimumRecovery();
         }
         throw error;
       }
+      return worker;
+    });
+  }
+
+  retain(worker: PooledWorker): void {
+    this.assertRunning();
+    if (
+      this.workers.get(worker.workerId) !== worker ||
+      this.retiring.has(worker) ||
+      isUnavailableWorker(worker)
+    ) {
+      throw new DaemonError("workerCrashed", "Worker is no longer available", {
+        workerId: worker.workerId,
+      });
     }
-    return worker;
+    this.reservations.set(worker, (this.reservations.get(worker) ?? 0) + 1);
   }
 
   release(worker: PooledWorker, threadId?: string): void {
-    if (isUnavailableWorker(worker)) {
+    const remaining = Math.max((this.reservations.get(worker) ?? 0) - 1, 0);
+    this.reservations.set(worker, remaining);
+    if (isUnavailableWorker(worker) || this.retiring.has(worker)) {
+      return;
+    }
+    worker.lastUsedAt = new Date();
+    if (remaining > 0 || worker.activeTurnId) {
       return;
     }
     worker.state = worker.threadId ? "assigned" : "idle";
-    worker.lastUsedAt = new Date();
     this.events.emit({
       type: "worker.idle",
       workerId: worker.workerId,
       threadId: threadId ?? worker.threadId,
       payload: { cwd: worker.cwd },
     });
+  }
+
+  private isQuiescent(worker: PooledWorker): boolean {
+    return (
+      (worker.state === "idle" || worker.state === "assigned") &&
+      !worker.activeTurnId &&
+      !worker.abortingTurnId &&
+      !this.retiring.has(worker) &&
+      (this.reservations.get(worker) ?? 0) === 0 &&
+      (worker.pendingCommandCount ?? 0) === 0
+    );
+  }
+
+  private isReclaimable(worker: PooledWorker): boolean {
+    return (
+      this.isQuiescent(worker) && (!worker.threadId || this.options.canReclaim?.(worker) !== false)
+    );
+  }
+
+  private async selectWorker(cwd: string): Promise<PooledWorker> {
+    const candidates = [...this.workers.values()].filter(
+      (worker) =>
+        this.isReclaimable(worker) &&
+        (this.options.reuseAcrossThreads !== false || !this.claimed.has(worker)),
+    );
+    const idle = candidates.find((worker) => worker.cwd === cwd);
+    if (idle) {
+      // Detach the previous thread before yielding so direct thread reads cannot
+      // retain this worker while its session is being replaced.
+      this.reserveForAssignment(idle);
+      idle.state = "assigned";
+      return idle;
+    }
+    if (this.workers.size >= this.options.maxWorkers) {
+      const victim = [...this.workers.values()]
+        .filter((worker) => this.isReclaimable(worker))
+        .sort((left, right) => left.lastUsedAt.getTime() - right.lastUsedAt.getTime())[0];
+      if (!victim) {
+        throw new DaemonError("capacity", "Worker capacity reached", {
+          maxWorkers: this.options.maxWorkers,
+        });
+      }
+      await this.retire(victim);
+    }
+    try {
+      return await this.spawn(cwd, true);
+    } catch (error) {
+      this.scheduleMinimumRecovery();
+      throw error;
+    }
+  }
+
+  private reserveForAssignment(worker: PooledWorker): void {
+    this.retain(worker);
+    this.claimed.add(worker);
+    worker.threadId = undefined;
+  }
+
+  private async retire(worker: PooledWorker): Promise<void> {
+    this.retiring.add(worker);
+    await worker.stop();
+    this.workers.delete(worker.workerId);
+  }
+
+  private assertRunning(): void {
+    if (this.stopped) {
+      throw new DaemonError("workerCrashed", "Worker pool is stopped");
+    }
+  }
+
+  private withLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.lifecycle.then(operation);
+    this.lifecycle = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async stopAll(): Promise<void> {
@@ -157,11 +290,13 @@ export class WorkerPool {
     }
     clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
-    await Promise.all([...this.workers.values()].map((worker) => worker.stop()));
-    this.workers.clear();
+    await this.withLifecycle(async () => {
+      await Promise.all([...this.workers.values()].map((worker) => worker.stop()));
+      this.workers.clear();
+    });
   }
 
-  private async spawn(cwd: string): Promise<PooledWorker> {
+  private async spawn(cwd: string, reserve = false): Promise<PooledWorker> {
     if (this.stopped) {
       throw new DaemonError("workerCrashed", "Worker pool is stopped");
     }
@@ -176,6 +311,9 @@ export class WorkerPool {
       piBin: this.options.piBin,
     });
     this.workers.set(worker.workerId, worker);
+    if (reserve) {
+      this.reserveForAssignment(worker);
+    }
     worker.on("event", (event) => this.events.emit(mapWorkerEvent(worker, event)));
     worker.on("exit", (event) => {
       if (worker.state !== "crashed") {
@@ -215,6 +353,9 @@ export class WorkerPool {
       await worker.stop().catch(() => undefined);
       throw error;
     }
+    if (reserve) {
+      worker.state = "assigned";
+    }
     this.events.emit({
       type: "worker.started",
       workerId: worker.workerId,
@@ -237,7 +378,7 @@ export class WorkerPool {
     }
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
-      void this.maintainMinimum().catch((error) => {
+      void this.withLifecycle(() => this.maintainMinimum()).catch((error) => {
         this.events.emit({
           type: "worker.crashed",
           payload: {
@@ -253,9 +394,12 @@ export class WorkerPool {
   }
 
   private async reapIdleWorkers(): Promise<void> {
+    if (this.stopped || this.options.idleTtlMs === 0) {
+      return;
+    }
     const now = Date.now();
     const candidates = [...this.workers.values()]
-      .filter((worker) => worker.state === "idle" || worker.state === "assigned")
+      .filter((worker) => this.isReclaimable(worker))
       .filter((worker) => now - worker.lastUsedAt.getTime() >= this.options.idleTtlMs)
       .sort((left, right) => left.lastUsedAt.getTime() - right.lastUsedAt.getTime());
 
@@ -263,8 +407,9 @@ export class WorkerPool {
       if (this.workers.size <= this.options.minWorkers) {
         break;
       }
-      this.workers.delete(worker.workerId);
-      await worker.stop();
+      if (this.isReclaimable(worker)) {
+        await this.retire(worker);
+      }
     }
     this.scheduleMinimumRecovery();
   }

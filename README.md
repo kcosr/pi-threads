@@ -18,7 +18,8 @@ opt-in secured HTTP/SSE and WebSocket RPC transports over one core service API.
 `pi-threads` runs a long-lived daemon that manages a pool of Pi `--mode rpc`
 subprocesses. CLI commands connect to that daemon; it reserves a worker for the
 requested thread or starts one for a new session. A worker is leased to one
-active thread at a time, then returned to the idle pool or reaped.
+active thread at a time. Idle workers can be reused or reaped; configuration can
+restrict each worker process to one thread for its entire lifetime.
 
 Pi remains the execution engine and owns the session JSONL. `pi-threads` adds
 only the in-memory scheduling, worker lifecycle, local transports, and
@@ -40,8 +41,8 @@ first.
 - Opt-in HTTP/SSE and WebSocket transports with bearer-token auth, Origin checks, and TLS
   requirements for non-loopback binds.
 - Cwd-aware worker scheduling for new Pi sessions.
-- In-memory worker pool with configurable `minWorkers`, `maxWorkers`, and idle
-  reaping down to `minWorkers`.
+- In-memory worker pool with configurable thread reuse, `minWorkers`,
+  `maxWorkers`, idle reaping, and eviction of idle workers when capacity is needed.
 - Thread list, search, detail, status, and flattened message history commands.
 - Prompted `new` and `send` commands that wait by default, can stream progress,
   and support JSON acceptance output or NDJSON event streams.
@@ -112,7 +113,8 @@ Example local config:
     "worker": {
       "minWorkers": 0,
       "maxWorkers": 4,
-      "idleTtlMs": 300000
+      "idleTtlMs": 300000,
+      "reuseAcrossThreads": true
     },
     "tcp": {
       "enabled": false,
@@ -304,9 +306,10 @@ Daemon worker fields:
 | Field | Purpose |
 | --- | --- |
 | `daemon.unixSocket` | Unix socket path for the default local daemon transport. |
-| `daemon.worker.minWorkers` | Number of workers to prewarm and maintain. Default `0`. |
-| `daemon.worker.maxWorkers` | Maximum worker processes. Default `4`; minimum `1`. |
-| `daemon.worker.idleTtlMs` | Idle time before non-running workers are reaped down to `minWorkers`. Default `300000`. |
+| `daemon.worker.minWorkers` | Minimum total workers to maintain; prewarmed workers start in the daemon cwd. Default `0`. |
+| `daemon.worker.maxWorkers` | Maximum worker processes. Idle workers can be evicted to admit another thread. Default `4`; minimum `1`. |
+| `daemon.worker.idleTtlMs` | Idle time before eligible workers are reaped down to `minWorkers`. Default `300000`; `0` disables timed reaping. |
+| `daemon.worker.reuseAcrossThreads` | Allow a worker process to serve different threads over its lifetime. Default `true`; `false` retains reuse only for the same thread. |
 | `daemon.tcp.enabled` | Enable HTTP RPC/SSE and WebSocket transports. Default `false`. |
 | `daemon.tcp.bind` | HTTP/WebSocket bind address. Default `127.0.0.1`. |
 | `daemon.tcp.port` | HTTP/WebSocket port. Default `8765`. |
@@ -484,15 +487,44 @@ The core service owns session catalog lookup, worker scheduling, leases, event
 fanout, active turn state, external-writer checks, and worker adaptation. CLI
 rendering and JSON-RPC transports are adapters over the same service methods.
 
-Workers are cwd-aware. A new thread for cwd `X` uses an idle worker already
-rooted at `X` or spawns a new worker in `X`. Existing sessions can be loaded
-into idle workers with internal `switch_session`. The daemon enforces one
-in-memory writer lease per Pi session id.
+Workers are cwd-aware. A new thread for cwd `X` uses an eligible idle worker
+rooted at `X` or spawns a new worker in `X`. Resuming an unloaded session also
+requires a worker launched in the session's saved cwd, in either reuse mode.
+With the default `daemon.worker.reuseAcrossThreads: true`, an idle worker in
+that directory can serve a different thread through internal `switch_session`.
+The daemon enforces one in-memory writer lease per Pi session id.
 
-`daemon.worker.minWorkers` prewarms and maintains that many total workers rooted
-at the daemon process cwd. The default is `0`; set it to `1` for a warm local
-worker. `daemon.worker.idleTtlMs` reaps non-running workers after the configured
-idle time, trimming the pool down to `minWorkers`. The default is five minutes.
+Set `daemon.worker.reuseAcrossThreads` to `false` to bind each worker process to
+one thread for its lifetime. Follow-up turns on that thread keep using its
+worker. After eviction, a request for the saved thread starts a fresh worker in
+the session's recorded cwd and loads the session. Clients continue using the
+same thread id and do not manage worker processes.
+
+Pi's `fork` and `clone` commands replace the session inside the current worker.
+They therefore require `reuseAcrossThreads: true`; with reuse disabled, these
+commands fail with `invalidParams` before changing the session.
+
+`daemon.worker.minWorkers` maintains a minimum total worker count. Workers
+created to fill that minimum start in the daemon process cwd. The default is
+`0`; use `0` when each thread needs a distinct directory, particularly with
+cross-thread reuse disabled. `daemon.worker.idleTtlMs` reaps eligible workers
+after the configured idle time, trimming the pool down to `minWorkers`. The
+default is five minutes; `0` disables timed reaping.
+
+When a request needs another worker at `maxWorkers`, the pool evicts the least
+recently used eligible idle worker and starts the required worker. This works
+even when timed reaping is disabled or the pool is at `minWorkers`. Workers with
+an active turn, command, or reservation are protected from eviction. If no
+worker can be evicted, the request fails with `capacity`.
+
+An idle worker whose thread has no saved transcript is also protected from
+reuse, timed reaping, and capacity eviction. Pi keeps promptless sessions and
+extension-handled input in memory until a user or assistant conversation
+message causes it to save the session file. Same-thread requests can continue
+using that worker; once Pi saves the transcript, it becomes eligible for
+reclamation. If an unsaved thread loses its worker through a crash or daemon
+shutdown, it cannot be resumed. Requests to resume a known thread with no saved
+file fail with `notFound` rather than creating a different session under its id.
 
 External writer detection is best-effort. For sessions the daemon has written
 during the current process lifetime, it records session file size, mtime, and

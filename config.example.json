@@ -8,7 +8,8 @@
     "worker": {
       "minWorkers": 0,
       "maxWorkers": 4,
-      "idleTtlMs": 300000
+      "idleTtlMs": 300000,
+      "reuseAcrossThreads": true
     },
     "tcp": {
       "enabled": false,
