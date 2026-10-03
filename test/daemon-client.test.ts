@@ -255,6 +255,33 @@ await new Promise(resolve => server.close(resolve));`,
 });
 
 describe("HTTP client failure handling", () => {
+  it.each([
+    "request",
+    "streamTurn",
+    "subscribe",
+  ] as const)("reports the HTTP status for non-JSON proxy errors during %s", async (operation) => {
+    let requests = 0;
+    const server = http.createServer((request, response) => {
+      requests++;
+      request.resume();
+      response.writeHead(502, { "Content-Type": "text/html" });
+      response.end("<html>Bad Gateway</html>");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const client = new DaemonClient({
+      endpoint: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    });
+    cleanups.push(() => client.close());
+    const result =
+      operation === "subscribe" ? client.subscribe() : client[operation]("thread/start", {});
+    await expect(result).rejects.toMatchObject({
+      code: "streamInterrupted",
+      message: "Expected a JSON response object, received HTTP 502",
+    });
+    expect(requests).toBe(1);
+  });
+
   it("rejects untrusted HTTPS and missing bearer credentials", async () => {
     const f = await fixture("https");
     const untrusted = new DaemonClient({ endpoint: f.endpoint, authToken: "secret" });

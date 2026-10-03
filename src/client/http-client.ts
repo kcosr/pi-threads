@@ -196,8 +196,14 @@ async function assertSse(response: IncomingMessage): Promise<void> {
 async function jsonBody(response: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of response) chunks.push(Buffer.from(chunk));
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!isRecord(value)) throw protocolError("Expected a JSON response object");
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw protocolError(`Expected a JSON response object, received HTTP ${response.statusCode}`);
+  }
+  if (!isRecord(value))
+    throw protocolError(`Expected a JSON response object, received HTTP ${response.statusCode}`);
   return value;
 }
 function parseFrame(frame: SseFrame): Record<string, unknown> {

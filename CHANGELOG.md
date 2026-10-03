@@ -41,6 +41,7 @@
 
 ### Fixed
 
+- Report the HTTP status when a proxy returns a non-JSON error page.
 - Closing a client or turn stream releases sockets even during connection or
   subscription setup, including unfinished WebSocket handshakes under Bun.
 
