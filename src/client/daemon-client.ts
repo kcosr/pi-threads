@@ -17,6 +17,8 @@ export interface DaemonClientOptions {
 export class DaemonClient extends EventEmitter {
   private nextId = 1;
   private transport: ClientTransport | undefined;
+  private connecting: Promise<void> | undefined;
+  private closed = false;
   private readonly pending = new Map<
     string,
     { resolve: (value: unknown) => void; reject: (error: unknown) => void }
@@ -27,37 +29,63 @@ export class DaemonClient extends EventEmitter {
   }
 
   async connect(): Promise<void> {
-    this.transport = await connectTransport(this.options);
-    this.transport.onMessage((line) => this.handleLine(line));
-    this.transport.onClose(() => {
-      for (const pending of this.pending.values()) {
-        pending.reject(new DaemonError("workerCrashed", "Daemon connection closed"));
-      }
-      this.pending.clear();
-    });
+    if (this.closed) {
+      throw new DaemonError("workerCrashed", "Daemon connection closed");
+    }
+    if (this.transport) return;
+    this.connecting ??= this.openTransport();
+    try {
+      await this.connecting;
+    } finally {
+      this.connecting = undefined;
+    }
+  }
+
+  private async openTransport(): Promise<void> {
+    const transport = await connectTransport(this.options);
+    if (this.closed) {
+      transport.close();
+      throw new DaemonError("workerCrashed", "Daemon connection closed");
+    }
+    this.transport = transport;
+    transport.onMessage((line) => this.handleLine(line));
+    transport.onClose(() => this.handleClose());
   }
 
   async request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
-    if (!this.transport) {
-      await this.connect();
-    }
+    await this.connect();
+    if (this.closed) throw new DaemonError("workerCrashed", "Daemon connection closed");
     const id = String(this.nextId++);
+    const line = encodeJsonLine({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: params ?? {},
+    });
     const result = new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+      try {
+        this.transport!.send(line);
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error);
+      }
     });
-    this.transport!.send(
-      encodeJsonLine({
-        jsonrpc: "2.0",
-        id,
-        method,
-        params: params ?? {},
-      }),
-    );
     return result;
   }
 
   async close(): Promise<void> {
+    this.handleClose();
     this.transport?.close();
+  }
+
+  private handleClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const error = new DaemonError("workerCrashed", "Daemon connection closed");
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+    this.emit("close", error);
   }
 
   private handleLine(line: string): void {
@@ -159,6 +187,7 @@ class LineTransport implements ClientTransport {
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => this.consume(chunk));
     socket.on("close", () => this.closeCallback?.());
+    socket.on("error", () => socket.destroy());
   }
 
   send(line: string): void {
@@ -206,6 +235,7 @@ class WebSocketTransport implements ClientTransport {
       }
     });
     socket.on("close", () => this.closeCallback?.());
+    socket.on("error", () => socket.terminate());
   }
 
   send(line: string): void {

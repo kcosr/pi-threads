@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import type { Socket } from "node:net";
 import { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
@@ -25,6 +26,11 @@ export async function startWebSocketServer(options: {
   assertAuthConfiguredForBind(options.bind, options.auth);
   const tlsOptions = loadTlsOptions(options.tls);
   const server = tlsOptions ? https.createServer(tlsOptions) : http.createServer();
+  const connections = new Set<Socket>();
+  server.on("connection", (socket) => {
+    connections.add(socket);
+    socket.once("close", () => connections.delete(socket));
+  });
   const wss = new WebSocketServer({
     server,
     verifyClient(info, done) {
@@ -44,17 +50,40 @@ export async function startWebSocketServer(options: {
       onShutdown: options.onShutdown,
     });
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(options.port, options.bind, () => {
-      server.off("error", reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      wss.once("error", reject);
+      server.listen(options.port, options.bind, () => {
+        server.off("error", reject);
+        wss.off("error", reject);
+        resolve();
+      });
     });
-  });
+  } catch (error) {
+    wss.close();
+    throw error;
+  }
+  const address = server.address();
+  const port = address && typeof address === "object" ? address.port : options.port;
+  let closing: Promise<void> | undefined;
   return {
-    name: `${tlsOptions ? "wss" : "ws"}://${options.bind}:${options.port}`,
-    close: async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+    name: `${tlsOptions ? "wss" : "ws"}://${options.bind}:${port}`,
+    close: () => {
+      closing ??= new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          for (const socket of wss.clients) socket.terminate();
+          for (const connection of connections) connection.destroy();
+        }, 1_000);
+        const websocketClosed = new Promise<void>((done) => wss.close(() => done()));
+        const httpClosed = new Promise<void>((done) => server.close(() => done()));
+        for (const socket of wss.clients) socket.close(1001, "Daemon stopping");
+        void Promise.all([websocketClosed, httpClosed]).then(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      return closing;
     },
   };
 }
@@ -67,9 +96,12 @@ class WebSocketDuplex extends Duplex {
   private constructor(private readonly socket: WebSocket) {
     super();
     socket.on("message", (data) => {
-      this.push(Buffer.isBuffer(data) ? data : Buffer.from(data.toString()));
+      const message = (
+        Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data)
+      ).toString("utf8");
+      this.push(message.endsWith("\n") ? message : `${message}\n`);
     });
-    socket.on("close", () => this.push(null));
+    socket.on("close", () => this.destroy());
     socket.on("error", (error) => this.destroy(error));
   }
 
@@ -82,5 +114,10 @@ class WebSocketDuplex extends Duplex {
   _final(callback: (error?: Error | null) => void): void {
     this.socket.close();
     callback();
+  }
+
+  _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    this.socket.terminate();
+    callback(error);
   }
 }

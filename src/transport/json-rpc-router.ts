@@ -18,24 +18,28 @@ export interface JsonRpcConnectionOptions {
 export class JsonRpcConnection {
   private buffer = "";
   private readonly subscriptions = new Set<string>();
+  private closed = false;
 
   constructor(private readonly options: JsonRpcConnectionOptions) {
     options.stream.setEncoding("utf8");
-    options.stream.on("data", (chunk: string) => void this.handleChunk(chunk));
+    options.stream.on("data", (chunk: string) => this.handleChunk(chunk));
     options.stream.on("close", () => this.close());
+    options.stream.on("end", () => this.close());
     options.stream.on("error", () => this.close());
   }
 
   close(): void {
+    this.closed = true;
     for (const subscription of this.subscriptions) {
       this.options.service.unsubscribe(subscription);
     }
     this.subscriptions.clear();
   }
 
-  private async handleChunk(chunk: string): Promise<void> {
+  private handleChunk(chunk: string): void {
+    if (this.closed) return;
     this.buffer += chunk;
-    for (;;) {
+    while (!this.closed) {
       const index = this.buffer.indexOf("\n");
       if (index === -1) {
         return;
@@ -45,7 +49,7 @@ export class JsonRpcConnection {
       if (!line) {
         continue;
       }
-      await this.handleLine(line);
+      void this.handleLine(line);
     }
   }
 
@@ -54,7 +58,11 @@ export class JsonRpcConnection {
     try {
       request = parseJsonRpcLine(line);
       const result = await this.dispatch(request);
-      this.write(success(request.id, result));
+      this.write(success(request.id, result), () => {
+        if (request?.method === "server/shutdown") {
+          void this.options.onShutdown?.();
+        }
+      });
     } catch (error) {
       this.write(failure(request?.id, error));
     }
@@ -85,18 +93,21 @@ export class JsonRpcConnection {
       if (!subscriptionId) {
         throw new DaemonError("invalidParams", "subscriptionId is required");
       }
-      this.subscriptions.delete(subscriptionId);
-      return { ok: this.options.service.unsubscribe(subscriptionId) };
+      return {
+        ok:
+          this.subscriptions.delete(subscriptionId) &&
+          this.options.service.unsubscribe(subscriptionId),
+      };
     }
-    const result = await this.options.service.dispatch(request.method, params);
-    if (request.method === "server/shutdown") {
-      queueMicrotask(() => void this.options.onShutdown?.());
-    }
-    return result;
+    return this.options.service.dispatch(request.method, params);
   }
 
-  private write(value: unknown): void {
-    this.options.stream.write(encodeJsonLine(value));
+  private write(value: unknown, onWritten?: () => void): void {
+    if (this.closed || this.options.stream.destroyed) {
+      onWritten?.();
+      return;
+    }
+    this.options.stream.write(encodeJsonLine(value), () => onWritten?.());
   }
 }
 

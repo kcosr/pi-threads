@@ -30,6 +30,7 @@ export interface FileBaseline {
 export class PiSessionCatalog {
   private readonly byId = new Map<string, SessionInfo>();
   private readonly baselines = new Map<string, FileBaseline>();
+  private readonly unpersisted = new Set<string>();
 
   async list(cwd?: string): Promise<ThreadSummary[]> {
     const sessions = cwd ? await listSessionsForCwd(resolve(cwd)) : await listAllSessions();
@@ -56,8 +57,17 @@ export class PiSessionCatalog {
     }
     const cached = this.byId.get(threadIdOrPath);
     if (cached && existsSync(cached.path)) {
+      const session = this.infoFromPath(cached.path);
+      this.unpersisted.delete(threadIdOrPath);
+      this.byId.delete(threadIdOrPath);
+      this.cache([session]);
+      if (session.id === threadIdOrPath) {
+        return session;
+      }
+    } else if (cached && this.unpersisted.has(threadIdOrPath)) {
       return cached;
     }
+    this.byId.delete(threadIdOrPath);
     await this.list();
     const refreshed = this.byId.get(threadIdOrPath);
     if (!refreshed) {
@@ -80,13 +90,16 @@ export class PiSessionCatalog {
   ): Promise<ThreadMessages> {
     const session = await this.resolveThread(threadIdOrPath);
     let messages: Array<Record<string, unknown>> = readSessionEntries(session.path)
-      .filter((entry): entry is SessionEntry & { message: unknown } => entry.type === "message")
+      .filter(
+        (entry): entry is SessionEntry & { message: Record<string, unknown> } =>
+          entry.type === "message" && isRecord(entry.message),
+      )
       .map((entry) => ({ entryId: entry.id, ...(entry.message as Record<string, unknown>) }));
     if (options?.role) {
       messages = messages.filter((message) => message.role === options.role);
     }
     if (options?.last !== undefined) {
-      messages = messages.slice(-options.last);
+      messages = options.last <= 0 ? [] : messages.slice(-options.last);
     }
     return { threadId: session.id, messages };
   }
@@ -147,7 +160,10 @@ export class PiSessionCatalog {
         } satisfies SessionInfo);
     this.cache([session]);
     if (existsSync(session.path)) {
+      this.unpersisted.delete(session.id);
       this.recordBaseline(session.id, session.path);
+    } else if (!this.baselines.has(session.id)) {
+      this.unpersisted.add(session.id);
     }
   }
 
@@ -261,11 +277,7 @@ function sessionInfoFromPath(path: string): SessionInfo | undefined {
   }
 }
 
-function sessionInfoFromEntries(
-  path: string,
-  stat: Stats,
-  entries: SessionEntry[],
-): SessionInfo {
+function sessionInfoFromEntries(path: string, stat: Stats, entries: SessionEntry[]): SessionInfo {
   const header = entries.find(isSessionHeader);
   if (!header) {
     throw new Error(`Invalid Pi session file: ${path}`);
@@ -359,11 +371,7 @@ function messageText(message: Record<string, unknown>): string {
     .join(" ");
 }
 
-function sessionModifiedDate(
-  entries: SessionEntry[],
-  header: SessionEntry,
-  fallback: Date,
-): Date {
+function sessionModifiedDate(entries: SessionEntry[], header: SessionEntry, fallback: Date): Date {
   let lastActivityTime: number | undefined;
   for (const entry of entries) {
     if (entry.type !== "message" || !isRecord(entry.message)) {
@@ -401,20 +409,28 @@ function parseDate(value: unknown, fallback: Date): Date {
 
 function sessionsRoot(): string {
   const agentDir = process.env.PI_CODING_AGENT_DIR
-    ? resolve(process.env.PI_CODING_AGENT_DIR)
+    ? resolvePiPath(process.env.PI_CODING_AGENT_DIR)
     : join(homedir(), ".pi", "agent");
   return join(agentDir, "sessions");
 }
 
 function defaultSessionDirForCwd(cwd: string): string {
-  const safePath = `--${resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  const safePath = `--${resolve(cwd)
+    .replace(/^[/\\]/, "")
+    .replace(/[/\\:]/g, "-")}--`;
   return join(sessionsRoot(), safePath);
 }
 
 function configuredSessionDir(): string | undefined {
   return process.env.PI_CODING_AGENT_SESSION_DIR
-    ? resolve(process.env.PI_CODING_AGENT_SESSION_DIR)
+    ? resolvePiPath(process.env.PI_CODING_AGENT_SESSION_DIR)
     : undefined;
+}
+
+function resolvePiPath(path: string): string {
+  return resolve(
+    path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path,
+  );
 }
 
 function sessionCwdMatches(sessionCwd: string | undefined, cwd: string): boolean {

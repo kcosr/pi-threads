@@ -109,7 +109,7 @@ cat >"$CONFIG" <<EOF
 }
 EOF
 
-pi --version >/dev/null
+"${PI_THREADS_PI_BIN:-pi}" --version >/dev/null
 
 if [[ -z "${PI_THREADS_ENDPOINT:-}" || "$ENDPOINT" == unix://* ]]; then
   bun run src/index.ts --config "$CONFIG" daemon start &

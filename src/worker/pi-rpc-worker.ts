@@ -72,25 +72,42 @@ export class PiRpcWorker extends EventEmitter {
       });
     }
     const piBin = this.options.piBin ?? process.env.PI_THREADS_PI_BIN ?? "pi";
-    this.child = spawn(piBin, ["--mode", "rpc"], {
+    const child = spawn(piBin, ["--mode", "rpc"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: piWorkerEnv(),
     });
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
-    this.child.stderr.on("data", (chunk: Buffer) => this.emit("stderr", chunk.toString("utf8")));
-    this.child.on("exit", (exitCode, signal) => {
+    this.child = child;
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
+    child.stderr.on("data", (chunk: Buffer) => this.emit("stderr", chunk.toString("utf8")));
+    child.stdin.on("error", (error) => {
+      this.rejectPending(
+        new DaemonError("workerCrashed", "Pi RPC input closed", { message: error.message }),
+      );
+    });
+    child.on("error", (error) => {
+      this.rejectPending(
+        new DaemonError("workerCrashed", "Pi RPC process failed", { message: error.message }),
+      );
+    });
+    child.on("close", (exitCode, signal) => {
       const wasStopped = this.state === "stopped";
       this.state = wasStopped ? "stopped" : "crashed";
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(
-          new DaemonError("workerCrashed", "Pi RPC worker exited", { exitCode, signal }),
-        );
-      }
-      this.pending.clear();
+      this.rejectPending(
+        new DaemonError("workerCrashed", "Pi RPC worker exited", { exitCode, signal }),
+      );
       this.emit("exit", { exitCode, signal });
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", (error) =>
+        reject(
+          new DaemonError("piRpcError", "Unable to start Pi RPC worker", {
+            message: error.message,
+          }),
+        ),
+      );
     });
     this.state = "idle";
   }
@@ -148,14 +165,27 @@ export class PiRpcWorker extends EventEmitter {
       throw new DaemonError("workerCrashed", "Worker is not running", { workerId: this.workerId });
     }
     const id = `rpc_${this.nextCommandId++}`;
-    const payload = { ...command, id };
+    const payload = `${JSON.stringify({ ...command, id })}\n`;
     const response = await new Promise<PiRpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new DaemonError("timeout", "Pi RPC command timed out", { command: command.type }));
+        this.state = "crashed";
+        this.rejectPending(new DaemonError("workerCrashed", "Pi RPC worker timed out"));
+        this.child?.kill("SIGKILL");
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.child!.stdin.write(`${JSON.stringify(payload)}\n`);
+      this.child!.stdin.write(payload, (error) => {
+        if (error) {
+          clearTimeout(timer);
+          this.pending.delete(id);
+          reject(
+            new DaemonError("workerCrashed", "Unable to write Pi RPC command", {
+              message: error.message,
+            }),
+          );
+        }
+      });
     });
     if (!response.success) {
       throw new DaemonError("piRpcError", response.error ?? "Pi RPC command failed", {
@@ -164,6 +194,14 @@ export class PiRpcWorker extends EventEmitter {
     }
     this.lastUsedAt = new Date();
     return response;
+  }
+
+  private rejectPending(error: DaemonError): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 
   private handleStdout(chunk: string): void {
@@ -228,9 +266,27 @@ export async function probePiVersion(
   child.stderr.on("data", (chunk: string) => {
     errorOutput += chunk;
   });
-  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-  const exitCode = await new Promise<number | null>((resolve) => child.on("close", resolve));
-  clearTimeout(timer);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, timeoutMs);
+  let exitCode: number | null;
+  try {
+    exitCode = await new Promise<number | null>((resolve, reject) => {
+      child.once("close", resolve);
+      child.once("error", (error) =>
+        reject(
+          new DaemonError("piRpcError", "Unable to run pi --version", { message: error.message }),
+        ),
+      );
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (timedOut) {
+    throw new DaemonError("timeout", "pi --version timed out", { timeoutMs });
+  }
   if (exitCode !== 0) {
     throw new DaemonError("piRpcError", "Unable to run pi --version", { exitCode });
   }
@@ -293,8 +349,8 @@ async function waitForExit(
     };
     const cleanup = () => {
       clearTimeout(timer);
-      child.off("exit", onExit);
+      child.off("close", onExit);
     };
-    child.once("exit", onExit);
+    child.once("close", onExit);
   });
 }

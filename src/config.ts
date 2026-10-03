@@ -136,20 +136,32 @@ function mergeConfig(base: PiThreadsConfig, override: Partial<PiThreadsConfig>):
 }
 
 function validateConfig(config: PiThreadsConfig, source: string): PiThreadsConfig {
-  if (config.daemon.worker.maxWorkers < 1) {
-    throw new Error(`${source}: daemon.worker.maxWorkers must be at least 1`);
+  if (
+    !Number.isSafeInteger(config.daemon.worker.maxWorkers) ||
+    config.daemon.worker.maxWorkers < 1
+  ) {
+    throw new Error(`${source}: daemon.worker.maxWorkers must be an integer of at least 1`);
   }
-  if (config.daemon.worker.minWorkers < 0) {
-    throw new Error(`${source}: daemon.worker.minWorkers must be non-negative`);
+  if (
+    !Number.isSafeInteger(config.daemon.worker.minWorkers) ||
+    config.daemon.worker.minWorkers < 0
+  ) {
+    throw new Error(`${source}: daemon.worker.minWorkers must be a non-negative integer`);
   }
   if (config.daemon.worker.minWorkers > config.daemon.worker.maxWorkers) {
     throw new Error(`${source}: daemon.worker.minWorkers cannot exceed maxWorkers`);
   }
-  if (config.daemon.worker.idleTtlMs < 0) {
-    throw new Error(`${source}: daemon.worker.idleTtlMs must be non-negative`);
+  if (!Number.isSafeInteger(config.daemon.worker.idleTtlMs) || config.daemon.worker.idleTtlMs < 0) {
+    throw new Error(`${source}: daemon.worker.idleTtlMs must be a non-negative integer`);
   }
   if (
-    config.defaults.thinking &&
+    config.defaults.model !== undefined &&
+    (typeof config.defaults.model !== "string" || config.defaults.model.trim().length === 0)
+  ) {
+    throw new Error(`${source}: defaults.model must be a non-empty string`);
+  }
+  if (
+    config.defaults.thinking !== undefined &&
     !THINKING_LEVELS.includes(config.defaults.thinking as (typeof THINKING_LEVELS)[number])
   ) {
     throw new Error(`${source}: defaults.thinking must be one of ${THINKING_LEVELS.join(", ")}`);

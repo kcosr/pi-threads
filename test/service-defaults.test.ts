@@ -126,7 +126,7 @@ function serviceWithWorker(
         acquireForNew: async () => worker,
         acquireForSession: async () => worker,
         release: () => undefined,
-        findByThread: () => undefined,
+        findByThread: () => worker,
         read: () => worker,
         list: () => [],
       } as unknown as WorkerPool,
@@ -140,7 +140,7 @@ class FakeWorker implements PooledWorker {
   readonly workerId = "worker-1";
   readonly cwd = "/tmp/project";
   readonly startedAt = new Date();
-  version = "0.75.5";
+  version = "1.0.0";
   state: PooledWorker["state"] = "idle";
   threadId: string | undefined;
   activeTurnId: string | undefined;
@@ -161,7 +161,12 @@ class FakeWorker implements PooledWorker {
         data: { models: this.availableModels },
       };
     }
-    return { type: "response" as const, command: String(command.type), success: true };
+    return {
+      type: "response" as const,
+      command: String(command.type),
+      success: true,
+      ...(command.type === "prompt" ? { data: { disposition: "started" } } : {}),
+    };
   }
 
   async getState(): Promise<Record<string, unknown>> {

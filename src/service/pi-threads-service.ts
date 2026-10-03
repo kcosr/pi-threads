@@ -15,6 +15,7 @@ import type {
 import { PI_COMPATIBILITY, VERSION } from "../version.ts";
 import { PiSessionCatalog } from "../session/catalog.ts";
 import { WorkerPool, type PooledWorker } from "../worker/worker-pool.ts";
+import { promptDisposition, queueDisposition } from "../worker/input-disposition.ts";
 import { EventBus, type EventListener } from "./event-bus.ts";
 
 interface ThreadListParams {
@@ -37,7 +38,12 @@ export class PiThreadsService {
   readonly workers: WorkerPool;
   private readonly defaults: PiThreadsConfig["defaults"];
   private readonly startedAt = Date.now();
-  private readonly activeTurns = new Map<string, { turnId: string; workerId?: string }>();
+  private readonly activeTurns = new Map<
+    string,
+    { turnId: string; workerId?: string; hasAgentRun?: boolean }
+  >();
+  private readonly turnCleanups = new Map<string, Promise<void>>();
+  private readonly sessionMutations = new Set<string>();
   private transportNames: string[] = [];
   private shuttingDown = false;
 
@@ -212,9 +218,7 @@ export class PiThreadsService {
       });
       if (params.prompt) {
         worker.state = "running";
-        void worker
-          .command({ type: "prompt", message: params.prompt }, 20_000)
-          .catch((error) => this.failTurn(threadId, turnId, worker, error));
+        this.submitPrompt(threadId, turnId, worker, params.prompt);
       } else {
         this.completePromptlessTurn(threadId, turnId, worker);
       }
@@ -234,7 +238,9 @@ export class PiThreadsService {
     model?: string;
     thinking?: string;
   }): Promise<AcceptedTurn> {
+    await this.turnCleanups.get(params.threadId);
     const session = await this.catalog.resolveThread(params.threadId);
+    await this.turnCleanups.get(session.id);
     this.catalog.assertUnchanged(session.id);
     const turnId = newTurnId();
     this.reserveTurn(session.id, turnId);
@@ -252,9 +258,7 @@ export class PiThreadsService {
         workerId: worker.workerId,
         payload: { promptPreview: preview(params.prompt) },
       });
-      void worker
-        .command({ type: "prompt", message: params.prompt }, 20_000)
-        .catch((error) => this.failTurn(session.id, turnId, worker, error));
+      this.submitPrompt(session.id, turnId, worker, params.prompt);
       return { threadId: session.id, turnId, workerId: worker.workerId, status: "accepted" };
     } catch (error) {
       this.activeTurns.delete(session.id);
@@ -265,50 +269,52 @@ export class PiThreadsService {
   async threadSteer(params: { threadId: string; prompt: string }): Promise<AcceptedTurn> {
     const active = this.requireActive(params.threadId);
     const worker = this.workers.read(active.workerId);
-    await worker.command({ type: "steer", message: params.prompt }, 20_000);
-    this.events.emit({
-      type: "queue.updated",
-      threadId: params.threadId,
-      turnId: active.turnId,
-      workerId: worker.workerId,
-      payload: { mode: "steer", pendingCount: 1, acceptedPromptId: active.turnId },
-    });
+    const disposition = queueDisposition(
+      await worker.command({ type: "steer", message: params.prompt }, 20_000),
+    );
     return {
       threadId: params.threadId,
       turnId: active.turnId,
       workerId: worker.workerId,
       status: "running",
+      disposition,
     };
   }
 
   async threadFollowUp(params: { threadId: string; prompt: string }): Promise<QueuedFollowUp> {
     const active = this.requireActive(params.threadId);
     const worker = this.workers.read(active.workerId);
-    await worker.command({ type: "follow_up", message: params.prompt }, 20_000);
-    this.events.emit({
-      type: "queue.updated",
+    const disposition = queueDisposition(
+      await worker.command({ type: "follow_up", message: params.prompt }, 20_000),
+    );
+    return {
       threadId: params.threadId,
-      turnId: active.turnId,
-      workerId: worker.workerId,
-      payload: { mode: "follow_up", pendingCount: 1, acceptedPromptId: active.turnId },
-    });
-    return { threadId: params.threadId, queuedForTurnId: active.turnId, status: "queued" };
+      ...(disposition === "queued" ? { queuedForTurnId: active.turnId } : {}),
+      status: disposition,
+    };
   }
 
   async threadAbort(params: { threadId: string }) {
     const active = this.requireActive(params.threadId);
     const worker = this.workers.read(active.workerId);
-    await worker.command({ type: "abort" }, 20_000);
-    worker.activeTurnId = undefined;
-    this.activeTurns.delete(params.threadId);
-    this.workers.release(worker, params.threadId);
-    this.events.emit({
-      type: "turn.aborted",
-      threadId: params.threadId,
-      turnId: active.turnId,
-      workerId: worker.workerId,
-      payload: { reason: "client", finalState: "aborted" },
-    });
+    worker.abortingTurnId = active.turnId;
+    try {
+      await worker.command({ type: "abort" }, 20_000);
+      if (this.activeTurns.get(params.threadId)?.turnId === active.turnId) {
+        this.events.emit({
+          type: "turn.aborted",
+          threadId: params.threadId,
+          turnId: active.turnId,
+          workerId: worker.workerId,
+          payload: { reason: "client", finalState: "aborted" },
+        });
+      }
+      await this.turnCleanups.get(params.threadId);
+    } finally {
+      if (worker.abortingTurnId === active.turnId) {
+        worker.abortingTurnId = undefined;
+      }
+    }
     return { threadId: params.threadId, turnId: active.turnId, status: "aborted" };
   }
 
@@ -331,63 +337,35 @@ export class PiThreadsService {
   }
 
   async threadFork(params: { threadId: string; entryId: string; name?: string }) {
-    if (this.activeTurns.has(params.threadId)) {
-      throw new DaemonError("busy", "Cannot fork a thread with an active daemon turn", {
-        threadId: params.threadId,
-      });
-    }
-    const session = await this.catalog.resolveThread(params.threadId);
-    const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
-    const response = await worker.command({ type: "fork", entryId: params.entryId }, 60_000);
-    assertNotCancelled(response, "fork");
-    if (params.name) {
-      await worker.command({ type: "set_session_name", name: params.name }, 20_000);
-    }
-    const state = await worker.getState();
-    worker.threadId = String(state.sessionId);
-    this.catalog.updateFromWorkerState({
-      sessionId: String(state.sessionId),
-      sessionFile: String(state.sessionFile ?? ""),
-      cwd: session.cwd,
-      sessionName: params.name,
+    return this.withSessionMutation(params.threadId, async (worker, sourceThreadId) => {
+      const response = await worker.command({ type: "fork", entryId: params.entryId }, 60_000);
+      assertNotCancelled(response, "fork");
+      if (params.name) {
+        await worker.command({ type: "set_session_name", name: params.name }, 20_000);
+      }
+      const state = await worker.getState();
+      worker.threadId = String(state.sessionId);
+      return { threadId: worker.threadId, sourceThreadId, data: response.data };
     });
-    return { threadId: String(state.sessionId), sourceThreadId: session.id, data: response.data };
   }
 
   async threadClone(params: { threadId: string; name?: string }) {
-    if (this.activeTurns.has(params.threadId)) {
-      throw new DaemonError("busy", "Cannot clone a thread with an active daemon turn", {
-        threadId: params.threadId,
-      });
-    }
-    const session = await this.catalog.resolveThread(params.threadId);
-    const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
-    assertNotCancelled(await worker.command({ type: "clone" }, 60_000), "clone");
-    if (params.name) {
-      await worker.command({ type: "set_session_name", name: params.name }, 20_000);
-    }
-    const state = await worker.getState();
-    worker.threadId = String(state.sessionId);
-    this.catalog.updateFromWorkerState({
-      sessionId: String(state.sessionId),
-      sessionFile: String(state.sessionFile ?? ""),
-      cwd: session.cwd,
-      sessionName: params.name,
+    return this.withSessionMutation(params.threadId, async (worker, sourceThreadId) => {
+      assertNotCancelled(await worker.command({ type: "clone" }, 60_000), "clone");
+      if (params.name) {
+        await worker.command({ type: "set_session_name", name: params.name }, 20_000);
+      }
+      const state = await worker.getState();
+      worker.threadId = String(state.sessionId);
+      return { threadId: worker.threadId, sourceThreadId };
     });
-    return { threadId: String(state.sessionId), sourceThreadId: session.id };
   }
 
   async threadNameSet(params: { threadId: string; name: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    await worker.command({ type: "set_session_name", name: params.name }, 20_000);
-    const state = await worker.getState();
-    this.catalog.updateFromWorkerState({
-      sessionId: params.threadId,
-      sessionFile: String(state.sessionFile ?? ""),
-      cwd: worker.cwd,
-      sessionName: params.name,
+    return this.withSessionMutation(params.threadId, async (worker, threadId) => {
+      await worker.command({ type: "set_session_name", name: params.name }, 20_000);
+      return { threadId, name: params.name };
     });
-    return { threadId: params.threadId, name: params.name };
   }
 
   async threadSettingsRead(params: { threadId: string }) {
@@ -405,42 +383,35 @@ export class PiThreadsService {
     autoCompaction?: boolean;
     autoRetry?: boolean;
   }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    await this.applySettings(worker, params);
-    if (params.steeringMode) {
-      await worker.command({ type: "set_steering_mode", mode: params.steeringMode }, 20_000);
-    }
-    if (params.followUpMode) {
-      await worker.command({ type: "set_follow_up_mode", mode: params.followUpMode }, 20_000);
-    }
-    if (params.autoCompaction !== undefined) {
-      await worker.command({ type: "set_auto_compaction", enabled: params.autoCompaction }, 20_000);
-    }
-    if (params.autoRetry !== undefined) {
-      await worker.command({ type: "set_auto_retry", enabled: params.autoRetry }, 20_000);
-    }
-    return this.threadSettingsRead({ threadId: params.threadId });
+    return this.withSessionMutation(params.threadId, async (worker, threadId) => {
+      await this.applySettings(worker, params);
+      if (params.steeringMode) {
+        await worker.command({ type: "set_steering_mode", mode: params.steeringMode }, 20_000);
+      }
+      if (params.followUpMode) {
+        await worker.command({ type: "set_follow_up_mode", mode: params.followUpMode }, 20_000);
+      }
+      if (params.autoCompaction !== undefined) {
+        await worker.command(
+          { type: "set_auto_compaction", enabled: params.autoCompaction },
+          20_000,
+        );
+      }
+      if (params.autoRetry !== undefined) {
+        await worker.command({ type: "set_auto_retry", enabled: params.autoRetry }, 20_000);
+      }
+      return { threadId, settings: await worker.getState() };
+    });
   }
 
   async threadCompact(params: { threadId: string; prompt?: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    this.events.emit({
-      type: "compaction.started",
-      threadId: params.threadId,
-      workerId: worker.workerId,
-      payload: { reason: "client" },
+    return this.withSessionMutation(params.threadId, async (worker, threadId) => {
+      const response = await worker.command(
+        { type: "compact", customInstructions: params.prompt },
+        10 * 60_000,
+      );
+      return { threadId, result: response.data };
     });
-    const response = await worker.command(
-      { type: "compact", customInstructions: params.prompt },
-      10 * 60_000,
-    );
-    this.events.emit({
-      type: "compaction.completed",
-      threadId: params.threadId,
-      workerId: worker.workerId,
-      payload: { status: "completed" },
-    });
-    return { threadId: params.threadId, result: response.data };
   }
 
   async threadExportHtml(params: { threadId: string }) {
@@ -457,14 +428,10 @@ export class PiThreadsService {
   }
 
   async threadBashRun(params: { threadId: string; command: string }) {
-    if (this.activeTurns.has(params.threadId)) {
-      throw new DaemonError("busy", "Bash is rejected while a daemon turn is active", {
-        threadId: params.threadId,
-      });
-    }
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    const response = await worker.command({ type: "bash", command: params.command }, 10 * 60_000);
-    return { threadId: params.threadId, result: response.data };
+    return this.withSessionMutation(params.threadId, async (worker, threadId) => {
+      const response = await worker.command({ type: "bash", command: params.command }, 10 * 60_000);
+      return { threadId, result: response.data };
+    });
   }
 
   async threadBashAbort(params: { threadId: string }) {
@@ -508,21 +475,24 @@ export class PiThreadsService {
 
   async modelsList(params: { provider?: string } = {}) {
     const worker = await this.workers.acquireForNew(process.cwd());
-    const response = await worker.command({ type: "get_available_models" }, 30_000);
-    this.workers.release(worker);
-    const data = (response.data ?? { models: [] }) as Record<string, unknown>;
-    if (!params.provider || !Array.isArray(data.models)) {
-      return data;
+    try {
+      const response = await worker.command({ type: "get_available_models" }, 30_000);
+      const data = (response.data ?? { models: [] }) as Record<string, unknown>;
+      if (!params.provider || !Array.isArray(data.models)) {
+        return data;
+      }
+      return {
+        ...data,
+        models: data.models.filter(
+          (model) =>
+            model &&
+            typeof model === "object" &&
+            (model as Record<string, unknown>).provider === params.provider,
+        ),
+      };
+    } finally {
+      this.workers.release(worker);
     }
-    return {
-      ...data,
-      models: data.models.filter(
-        (model) =>
-          model &&
-          typeof model === "object" &&
-          (model as Record<string, unknown>).provider === params.provider,
-      ),
-    };
   }
 
   async usageRead(params: { threadId?: string } = {}) {
@@ -618,12 +588,64 @@ export class PiThreadsService {
   }
 
   private async workerForRequiredMethod(threadId: string): Promise<PooledWorker> {
+    await this.turnCleanups.get(threadId);
     const assigned = this.workers.findByThread(threadId);
     if (assigned) {
       return assigned;
     }
     const session = await this.catalog.resolveThread(threadId);
+    await this.turnCleanups.get(session.id);
     return this.workers.acquireForSession(session.id, session.cwd, session.path);
+  }
+
+  private async withSessionMutation<T>(
+    threadId: string,
+    mutate: (worker: PooledWorker, threadId: string) => Promise<T>,
+  ): Promise<T> {
+    await this.turnCleanups.get(threadId);
+    const session = await this.catalog.resolveThread(threadId);
+    await this.turnCleanups.get(session.id);
+    if (this.activeTurns.has(session.id) || this.sessionMutations.has(session.id)) {
+      throw new DaemonError("busy", "Thread already has active daemon work", {
+        threadId: session.id,
+      });
+    }
+    this.catalog.assertUnchanged(session.id);
+    this.sessionMutations.add(session.id);
+    let worker: PooledWorker | undefined;
+    try {
+      worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
+      worker.state = "running";
+      return await mutate(worker, session.id);
+    } finally {
+      try {
+        if (worker && (worker.state === "crashed" || worker.state === "stopped")) {
+          await this.refreshOwnedSession(session.id);
+        } else if (worker) {
+          const state = await worker.getState();
+          worker.threadId = String(state.sessionId ?? session.id);
+          this.catalog.updateFromWorkerState({
+            sessionId: worker.threadId,
+            sessionFile: String(state.sessionFile ?? ""),
+            cwd: worker.cwd,
+            sessionName: typeof state.sessionName === "string" ? state.sessionName : undefined,
+          });
+        }
+      } catch (error) {
+        this.events.emit({
+          type: "thread.updated",
+          threadId: worker?.threadId ?? session.id,
+          workerId: worker?.workerId,
+          payload: {
+            internalError: error instanceof Error ? error.message : String(error),
+            operation: "session.refresh",
+          },
+        });
+      } finally {
+        this.sessionMutations.delete(session.id);
+        if (worker) this.workers.release(worker);
+      }
+    }
   }
 
   private async applySettings(
@@ -673,7 +695,9 @@ export class PiThreadsService {
       ?.models ?? []) as Array<Record<string, unknown>>;
     const match = models.find((candidate) => {
       if (explicitProvider && candidate.provider !== explicitProvider) return false;
-      return candidate.id === (explicitModel ?? model) || candidate.name === (explicitModel ?? model);
+      return (
+        candidate.id === (explicitModel ?? model) || candidate.name === (explicitModel ?? model)
+      );
     });
     if (!match || typeof match.provider !== "string" || typeof match.id !== "string") {
       if (explicitProvider && explicitModel && !explicitModel.includes("/")) {
@@ -692,9 +716,9 @@ export class PiThreadsService {
 
   private completePromptlessTurn(threadId: string, turnId: string, worker: PooledWorker): void {
     queueMicrotask(() => {
-      this.activeTurns.delete(threadId);
-      worker.activeTurnId = undefined;
-      this.workers.release(worker, threadId);
+      if (this.activeTurns.get(threadId)?.turnId !== turnId) {
+        return;
+      }
       this.events.emit({
         type: "turn.completed",
         threadId,
@@ -705,10 +729,35 @@ export class PiThreadsService {
     });
   }
 
+  private submitPrompt(
+    threadId: string,
+    turnId: string,
+    worker: PooledWorker,
+    message: string,
+  ): void {
+    void worker
+      .command({ type: "prompt", message }, 20_000)
+      .then((response) => {
+        const disposition = promptDisposition(response);
+        const active = this.activeTurns.get(threadId);
+        if (active?.turnId !== turnId || disposition !== "handled" || active.hasAgentRun) {
+          return;
+        }
+        this.events.emit({
+          type: "turn.completed",
+          threadId,
+          turnId,
+          workerId: worker.workerId,
+          payload: { status: "completed", disposition },
+        });
+      })
+      .catch((error) => this.failTurn(threadId, turnId, worker, error));
+  }
+
   private failTurn(threadId: string, turnId: string, worker: PooledWorker, error: unknown): void {
-    this.activeTurns.delete(threadId);
-    worker.activeTurnId = undefined;
-    this.workers.release(worker, threadId);
+    if (this.activeTurns.get(threadId)?.turnId !== turnId) {
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     this.events.emit({
       type: "turn.failed",
@@ -720,8 +769,8 @@ export class PiThreadsService {
   }
 
   private reserveTurn(threadId: string, turnId: string): void {
-    if (this.activeTurns.has(threadId)) {
-      throw new DaemonError("busy", "Thread already has an active daemon turn", { threadId });
+    if (this.activeTurns.has(threadId) || this.sessionMutations.has(threadId)) {
+      throw new DaemonError("busy", "Thread already has active daemon work", { threadId });
     }
     this.activeTurns.set(threadId, { turnId });
   }
@@ -730,26 +779,67 @@ export class PiThreadsService {
     if (this.shuttingDown) {
       return;
     }
-    if (!isTerminalDaemonEvent(event.type) || !event.threadId || !event.turnId) {
+    if (!event.threadId || !event.turnId) {
       return;
     }
     const active = this.activeTurns.get(event.threadId);
     if (!active?.workerId || active.turnId !== event.turnId) {
       return;
     }
+    if (event.type === "turn.started") {
+      active.hasAgentRun = true;
+      return;
+    }
+    if (!isTerminalDaemonEvent(event.type)) {
+      return;
+    }
     this.activeTurns.delete(event.threadId);
-    const worker = this.workers.findByThread(event.threadId) ?? this.workers.read(active.workerId);
-    worker.activeTurnId = undefined;
+    const worker = this.workers.findByThread(event.threadId);
+    if (worker?.workerId === active.workerId) {
+      worker.activeTurnId = undefined;
+    }
+    let cleanup: Promise<void>;
+    if (
+      !worker ||
+      worker.workerId !== active.workerId ||
+      worker.state === "crashed" ||
+      worker.state === "stopped"
+    ) {
+      cleanup = this.refreshOwnedSession(event.threadId);
+    } else {
+      this.workers.release(worker, event.threadId);
+      cleanup = this.refreshWorkerSession(worker, event.threadId);
+    }
+    this.turnCleanups.set(event.threadId, cleanup);
+    try {
+      await cleanup;
+    } finally {
+      if (this.turnCleanups.get(event.threadId) === cleanup) {
+        this.turnCleanups.delete(event.threadId);
+      }
+    }
+  }
+
+  private async refreshOwnedSession(threadId: string): Promise<void> {
+    const session = await this.catalog.resolveThread(threadId);
+    this.catalog.updateFromWorkerState({
+      sessionId: session.id,
+      sessionFile: session.path,
+      cwd: session.cwd,
+      sessionName: session.name,
+    });
+  }
+
+  private async refreshWorkerSession(worker: PooledWorker, threadId: string): Promise<void> {
     const state = await worker.getState().catch(() => undefined);
-    if (state) {
+    if (state && worker.threadId === threadId && !worker.activeTurnId) {
       this.catalog.updateFromWorkerState({
-        sessionId: String(state.sessionId ?? event.threadId),
+        sessionId: String(state.sessionId ?? threadId),
         sessionFile: String(state.sessionFile ?? ""),
         cwd: worker.cwd,
         sessionName: typeof state.sessionName === "string" ? state.sessionName : undefined,
       });
     }
-    this.workers.release(worker, event.threadId);
   }
 }
 

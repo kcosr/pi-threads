@@ -331,9 +331,8 @@ Worker pool requirements:
 
 ### Active Turn Leases
 
-A daemon turn is one Pi agent-run boundary: Pi `agent_start` through the
-matching terminal event. That event is the final `agent_end` through Pi 0.80
-and `agent_settled` starting with Pi 0.81.
+A daemon turn spans Pi `agent_start` through `agent_settled`, including
+automatic retries and queued continuations.
 
 Requirements:
 
@@ -350,11 +349,10 @@ Requirements:
 - Prompted `new` and `send` return after acceptance unless the CLI waits or
   streams.
 - Pi prompt RPC acknowledgment is not terminal completion. Terminal completion
-  comes from the version-appropriate terminal event, abort response, worker
-  crash, or explicit failure inference.
-- Through Pi 0.80, `agent_end` with `willRetry: true` is non-terminal and the
-  final `agent_end` completes the daemon turn.
-- Starting with Pi 0.81, every `agent_end` is non-terminal. The daemon retains
+  comes from `agent_settled`, the abort response, worker crash, or explicit
+  failure inference. A `handled` prompt that starts no run completes without
+  waiting for an event.
+- Every `agent_end` is non-terminal. The daemon retains
   the latest run outcome until `agent_settled`, which covers automatic retries,
   compaction retries, and queued continuations.
 - An assistant stop reason of `error` or `aborted` on the terminal run emits
@@ -479,6 +477,7 @@ Daemon event types:
 - `message.delta`
 - `message.completed`
 - `tool.started`
+- `tool.updated`
 - `tool.completed`
 - `retry.scheduled`
 - `retry.completed`
@@ -506,19 +505,19 @@ Pi event mapping:
 | `message_start` / `message_update` | `message.delta` |
 | `message_end` | `message.completed` |
 | `tool_execution_start` | `tool.started` |
-| `tool_execution_update` / `tool_execution_end` | `tool.completed` |
+| `tool_execution_update` | `tool.updated` |
+| `tool_execution_end` | `tool.completed` |
 | `auto_retry_start` | `retry.scheduled` |
 | `auto_retry_end` | `retry.completed` |
 | `compaction_start` | `compaction.started` |
 | `compaction_end` | `compaction.completed` |
 | `extension_ui_request` | `extension_ui.requested` |
 | `extension_error` | `extension.error` |
-| final successful `agent_end` through Pi 0.80 | `turn.completed` |
-| final failed `agent_end` through Pi 0.80 | `turn.failed` |
-| `agent_end` with `willRetry: true` through Pi 0.80 | non-terminal `thread.updated` |
-| `agent_end` starting with Pi 0.81 | non-terminal `thread.updated` |
-| successful `agent_settled` starting with Pi 0.81 | `turn.completed` |
-| failed `agent_settled` starting with Pi 0.81 | `turn.failed` |
+| `agent_end` | non-terminal `thread.updated` |
+| successful `agent_settled` | `turn.completed` |
+| failed `agent_settled` | `turn.failed` |
+| `agent_settled` during a requested abort | `turn.aborted` |
+| `queue_update` | `queue.updated` |
 
 Event payloads may include raw Pi event data under `piEvent` or as payload
 fields. Transports must not rename daemon event types.
@@ -532,7 +531,8 @@ Unix socket JSON-RPC JSONL is the default local transport.
 Requirements:
 
 - Listen on `daemon.unixSocket`.
-- Remove stale socket files on startup and close.
+- Refuse live sockets and non-socket paths; reclaim only confirmed stale sockets.
+- Close connected clients during shutdown with a bounded grace period.
 - Use strict LF-delimited JSONL.
 - No bearer token is required for local Unix socket access.
 
@@ -816,7 +816,7 @@ Current compatibility target:
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| 0.1.x | 0.75.x through 0.82.x | Current supported range |
+| Next release | 1.0.x (tested: 1.0.0) | Current supported range |
 
 Worker assignment refuses unsupported `pi --version` values.
 
@@ -853,7 +853,7 @@ Pi event names used:
 
 - `agent_start`
 - `agent_end`
-- `agent_settled` on Pi 0.81 and newer
+- `agent_settled`
 - `turn_start`
 - `turn_end`
 - `message_start`
@@ -897,8 +897,7 @@ Pi event names used:
 - Worker acquisition is atomic from the pool's perspective.
 - `switch_session` is internal and never public.
 - Prompt RPC acknowledgment is not terminal turn completion.
-- `agent_end willRetry:true` is non-terminal, and all Pi 0.81+ `agent_end`
-  events remain non-terminal until `agent_settled`.
+- All `agent_end` events remain non-terminal until `agent_settled`.
 - Failed Pi runs surface as `turn.failed`, not `turn.completed`.
 - Real Pi event names are used in mocks and event mapping.
 - Live smoke remains opt-in; mock smoke is the no-cost default coverage.
