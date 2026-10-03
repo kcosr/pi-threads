@@ -2,7 +2,7 @@ import type { PiThreadsConfig } from "./config.ts";
 import { PiThreadsService } from "./service/pi-threads-service.ts";
 import { startStdioServer } from "./transport/stdio.ts";
 import { startUnixSocketServer, type RunningTransport } from "./transport/unix.ts";
-import { startWebSocketServer } from "./transport/websocket.ts";
+import { startNetworkServer } from "./transport/http.ts";
 
 export interface DaemonRuntime {
   service: PiThreadsService;
@@ -41,7 +41,7 @@ export async function startDaemon(
     }
     if (config.daemon.tcp.enabled) {
       transports.push(
-        await startWebSocketServer({
+        await startNetworkServer({
           bind: config.daemon.tcp.bind,
           port: config.daemon.tcp.port,
           tls: config.daemon.tcp.tls,
@@ -59,6 +59,6 @@ export async function startDaemon(
     await stop();
     throw error;
   }
-  service.setTransports(transports.map((transport) => transport.name));
+  service.setTransports(transports.flatMap((transport) => transport.names));
   return { service, transports, stop };
 }

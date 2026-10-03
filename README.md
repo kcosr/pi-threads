@@ -307,7 +307,7 @@ Daemon worker fields:
 | `daemon.worker.minWorkers` | Number of workers to prewarm and maintain. Default `0`. |
 | `daemon.worker.maxWorkers` | Maximum worker processes. Default `4`; minimum `1`. |
 | `daemon.worker.idleTtlMs` | Idle time before non-running workers are reaped down to `minWorkers`. Default `300000`. |
-| `daemon.tcp.enabled` | Enable WebSocket JSON-RPC transport. Default `false`. |
+| `daemon.tcp.enabled` | Enable HTTP RPC/SSE and WebSocket transports. Default `false`. |
 | `daemon.tcp.bind` | WebSocket bind address. Default `127.0.0.1`. |
 | `daemon.tcp.port` | WebSocket port. Default `8765`. |
 | `daemon.tcp.authToken` | Inline bearer token. Prefer `authTokenEnv` on shared systems. |
@@ -524,6 +524,77 @@ Events are delivered in publication order, including nested lifecycle events.
 TCP access is shell-equivalent capability because Pi can execute commands and
 mutate files. Treat tokens and TLS keys accordingly. Prefer `authTokenEnv` over
 literal tokens in config files on shared systems.
+
+## HTTP RPC and streaming
+
+With `daemon.tcp.enabled: true`, one listener serves `POST /rpc`, `GET /events`,
+and WebSocket upgrades at `/`. Its default address is `http://127.0.0.1:8765`.
+TLS configuration changes it to HTTPS/WSS. Network access is disabled by default.
+
+POST the existing single-request RPC envelope with `Content-Type: application/json`.
+`Accept: application/json` (also the default) returns one RPC result or error:
+
+```bash
+curl http://127.0.0.1:8765/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/status","params":{}}'
+```
+
+To submit a turn and stream through completion, request SSE:
+
+```bash
+curl -N http://127.0.0.1:8765/rpc \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"thread/send","params":{"threadId":"THREAD_ID","prompt":"Fix the tests"}}'
+```
+
+Finite streaming supports only `thread/start` and `thread/send`. The response is
+`text/event-stream`, with these frame types:
+
+- `response`: the existing RPC acceptance response, or an RPC error if admission
+  fails. Acceptance means the daemon owns the work, not that execution succeeded.
+- `thread/event`: an existing `{jsonrpc:"2.0",method:"thread/event",params:EVENT}`
+  notification. `EVENT` includes `eventId`, `timestamp`, `type`, applicable thread,
+  turn and worker IDs, and the original `payload`. Text deltas remain nested in
+  Pi's message-update payload. Each notification includes its cursor as SSE `id`.
+- `stream/error`: a notification with `params: {code,message}` for observation
+  failures such as overflow or shutdown. This is distinct from `turn.failed`.
+
+The acceptance response precedes all events. Only events for its exact thread
+and turn are streamed. The first `turn.completed`, `turn.failed`, or `turn.aborted`
+ends the response after that event. EOF without a terminal event is interruption.
+There is no additional final-text aggregation or `[DONE]` sentinel.
+
+`GET /events` owns a live subscription until its response closes. Query filters
+are `threadId`, `turnId`, and comma-separated `eventTypes`. Resume retained events
+with `Last-Event-ID: CURSOR` or a `sinceEventId` query parameter. Conflicting
+cursors, duplicate filters, unknown filters and invalid event types are rejected.
+An expired or prior-instance cursor returns HTTP 409 with `eventHistoryLost`.
+Replay remains in memory and cannot recover events beyond the retention window.
+
+Disconnecting an HTTP stream only stops observation. Abort work explicitly with
+`thread/abort`. Never automatically resubmit a POST after losing its response:
+RPC request IDs correlate responses and do not deduplicate commands.
+
+HTTP requests are limited to 1 MiB. Each stream buffer and SSE frame is limited
+to 4 MiB; stalled response writers are disconnected after 30 seconds without
+backpressure relief. SSE sends heartbeat comments every 15 seconds when writable.
+Reverse proxies must allow long responses and disable response buffering; the
+server sends `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
+
+Bearer tokens and TLS use the same configuration as WebSocket. All supplied
+Origins must match `allowedOrigins`, including on loopback; an empty list denies
+browser origins. Allowed origins receive CORS headers and OPTIONS preflight
+support. Browser clients use streaming `fetch` for POST or GET with an explicit
+Authorization header. No cookies or query-string tokens are used.
+
+Malformed HTTP/envelopes and transport policy errors use HTTP 4xx/5xx plus the
+RPC error envelope. Dispatched ordinary RPC calls return HTTP 200 with either
+`result` or `error`. Once SSE begins, errors use the frames described above.
+The existing RPC contract uses string error codes, has no batch support, and
+responds to requests without IDs with `id:null`; it is not a generic JSON-RPC
+2.0 conformance implementation. HTTP uses that same contract.
 
 ## Tests And Smoke
 

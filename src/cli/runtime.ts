@@ -24,8 +24,8 @@ export class CliRuntime {
   async daemonStart(options: { stdio?: boolean }): Promise<void> {
     const runtime = await startDaemon(this.config(), { stdio: options.stdio });
     if (!options.stdio) {
-      for (const transport of runtime.transports) {
-        process.stderr.write(`listening ${transport.name}\n`);
+      for (const name of runtime.transports.flatMap((transport) => transport.names)) {
+        process.stderr.write(`listening ${name}\n`);
       }
     }
     const stop = async () => {

@@ -5,7 +5,7 @@ import type { PiThreadsService } from "../service/pi-threads-service.ts";
 import { JsonRpcConnection } from "./json-rpc-router.ts";
 
 export interface RunningTransport {
-  name: string;
+  names: string[];
   close: () => Promise<void>;
 }
 
@@ -38,7 +38,7 @@ export async function startUnixSocketServer(options: {
   }
   let closing: Promise<void> | undefined;
   return {
-    name: `unix://${options.path}`,
+    names: [`unix://${options.path}`],
     close: () => {
       closing ??= new Promise<void>((resolve) => {
         const timer = setTimeout(() => {

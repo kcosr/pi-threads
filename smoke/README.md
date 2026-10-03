@@ -35,3 +35,7 @@ The live harness cleans up temporary config, socket, and work directories it cre
 `bun run check` includes cursor expiry/restart, nested event ordering, replay
 reentrancy, immediate turn completion, exact-turn filtering, observer cleanup,
 and bounded stream buffering tests. These tests do not invoke a model provider.
+
+HTTP transport tests cover RPC results/errors, streamed admission and execution,
+filtered replay, disconnect cleanup, authentication/CORS, request limits, stalled
+readers and shared HTTP/WebSocket shutdown. Run `bun run check` for these tests.

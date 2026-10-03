@@ -13,6 +13,10 @@
 
 ### Added
 
+- Serve HTTP RPC and SSE alongside WebSocket on the opt-in TCP listener, with
+  finite streamed turns, filtered/resumable subscriptions, bearer authentication,
+  browser Origin/CORS checks, bounded buffering, and shutdown cleanup.
+
 - Add bounded, transport-independent turn stream coordination with acceptance
   ordering, exact-turn filtering, and deterministic observer cleanup.
 
