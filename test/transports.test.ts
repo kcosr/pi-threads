@@ -10,7 +10,7 @@ import { defaultConfig } from "../src/config.ts";
 import { startDaemon } from "../src/daemon.ts";
 import { PiThreadsService } from "../src/service/pi-threads-service.ts";
 import { startUnixSocketServer, type RunningTransport } from "../src/transport/unix.ts";
-import { startWebSocketServer } from "../src/transport/websocket.ts";
+import { startNetworkServer } from "../src/transport/http.ts";
 
 describe("daemon transports", () => {
   const cleanups: Array<() => void | Promise<void>> = [];
@@ -50,7 +50,7 @@ describe("daemon transports", () => {
   }
 
   async function websocket(transport: RunningTransport): Promise<WebSocket> {
-    const socket = new WebSocket(transport.name);
+    const socket = new WebSocket(transport.names[1]!);
     cleanups.push(() => socket.terminate());
     await once(socket, "open");
     return socket;
@@ -125,7 +125,7 @@ describe("daemon transports", () => {
   it("accepts whole WebSocket JSON messages and releases subscriptions on disconnect", async () => {
     const target = service();
     const transport = track(
-      await startWebSocketServer({
+      await startNetworkServer({
         bind: "127.0.0.1",
         port: 0,
         auth: {},
@@ -145,7 +145,7 @@ describe("daemon transports", () => {
 
   it("closes WebSocket clients and idle HTTP connections during shutdown", async () => {
     const transport = track(
-      await startWebSocketServer({
+      await startNetworkServer({
         bind: "127.0.0.1",
         port: 0,
         auth: {},
@@ -153,7 +153,7 @@ describe("daemon transports", () => {
       }),
     );
     const socket = await websocket(transport);
-    const endpoint = new URL(transport.name);
+    const endpoint = new URL(transport.names[0]!);
     const idle = net.createConnection({ host: endpoint.hostname, port: Number(endpoint.port) });
     cleanups.push(() => {
       idle.destroy();
@@ -161,6 +161,34 @@ describe("daemon transports", () => {
     await once(idle, "connect");
     await transport.close();
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+  });
+
+  it("enforces bearer credentials and origins for WebSocket upgrades on the shared listener", async () => {
+    const transport = track(
+      await startNetworkServer({
+        bind: "127.0.0.1",
+        port: 0,
+        auth: { token: "secret", allowedOrigins: ["https://app.example"] },
+        service: service(),
+      }),
+    );
+    for (const headers of [
+      { Origin: "https://app.example" },
+      { Origin: "https://app.example", Authorization: "Bearer wrong" },
+      { Origin: "https://evil.example", Authorization: "Bearer secret" },
+    ]) {
+      const socket = new WebSocket(transport.names[1]!, { headers });
+      cleanups.push(() => socket.terminate());
+      await expect(once(socket, "open")).rejects.toThrow("401");
+    }
+    const socket = new WebSocket(transport.names[1]!, {
+      headers: { Origin: "https://app.example", Authorization: "Bearer secret" },
+    });
+    cleanups.push(() => socket.terminate());
+    await once(socket, "open");
+    const response = once(socket, "message");
+    socket.send('{"jsonrpc":"2.0","id":"auth","method":"server/status"}');
+    expect(JSON.parse(String((await response)[0])).result).toEqual({ ok: true });
   });
 
   it("cleans up an already-open Unix transport when later daemon startup fails", async () => {

@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const root = join(tmpdir(), `pi-threads-mock-${Date.now()}`);
+const root = mkdtempSync(join(tmpdir(), "pi-threads-mock-"));
 const bin = join(root, "pi");
 const socket = join(root, "daemon.sock");
 const configPath = join(root, "config.json");
@@ -37,7 +37,7 @@ process.stdin.on("data", chunk => {
     if (cmd.type === "new_session") { id = "mock-" + Math.random().toString(16).slice(2); file = path.join(process.cwd(), ".fake-pi", id + ".jsonl"); ensureSession(); send({id:cmd.id,type:"response",command:"new_session",success:true,data:{cancelled:false}}); }
     else if (cmd.type === "switch_session") { file = cmd.sessionPath; const header = JSON.parse(fs.readFileSync(file, "utf8").split("\\n")[0]); id = header.id; send({id:cmd.id,type:"response",command:"switch_session",success:true,data:{cancelled:false}}); }
     else if (cmd.type === "get_state") { ensureSession(); send({id:cmd.id,type:"response",command:"get_state",success:true,data:{sessionId:id,sessionFile:file,sessionName:name,thinkingLevel:"medium",isStreaming:false,isCompacting:false,steeringMode:"all",followUpMode:"one-at-a-time",autoCompactionEnabled:true,messageCount:0,pendingMessageCount:0}}); }
-    else if (cmd.type === "prompt") { ensureSession(); send({id:cmd.id,type:"response",command:"prompt",success:true,data:{disposition:"started"}}); send({type:"agent_start",id:"run"}); setTimeout(() => { fs.appendFileSync(file, JSON.stringify({type:"message",id:"m1",parentId:null,timestamp:new Date().toISOString(),message:{role:"user",content:cmd.message}})+"\\n"); send({type:"message_end",message:{role:"assistant",content:"ok",stopReason:"stop"}}); send({type:"agent_end",messages:[{role:"assistant",content:"ok",stopReason:"stop"}],willRetry:false}); send({type:"agent_settled"}); }, 20); }
+    else if (cmd.type === "prompt") { ensureSession(); send({id:cmd.id,type:"response",command:"prompt",success:true,data:{disposition:"started"}}); send({type:"agent_start",id:"run"}); setTimeout(() => { fs.appendFileSync(file, JSON.stringify({type:"message",id:"m1",parentId:null,timestamp:new Date().toISOString(),message:{role:"user",content:cmd.message}})+"\\n"); send({type:"message_update",assistantMessageEvent:{type:"text_delta",delta:"ok"}}); send({type:"message_end",message:{role:"assistant",content:"ok",stopReason:"stop"}}); send({type:"agent_end",messages:[{role:"assistant",content:"ok",stopReason:"stop"}],willRetry:false}); send({type:"agent_settled"}); }, 20); }
     else if (cmd.type === "set_session_name") { ensureSession(); name = cmd.name; fs.appendFileSync(file, JSON.stringify({type:"session_info",id:"n1",parentId:null,timestamp:new Date().toISOString(),name})+"\\n"); send({id:cmd.id,type:"response",command:"set_session_name",success:true}); }
     else if (cmd.type === "get_messages") { send({id:cmd.id,type:"response",command:"get_messages",success:true,data:{messages:[{role:"user",content:"mock"}]}}); }
     else if (cmd.type === "get_available_models") { send({id:cmd.id,type:"response",command:"get_available_models",success:true,data:{models:[{provider:"mock",id:"mock-model"}]}}); }
@@ -50,11 +50,41 @@ process.stdin.on("data", chunk => {
 `,
 );
 chmodSync(bin, 0o755);
+const tls =
+  process.env.PI_THREADS_SMOKE_TLS === "1"
+    ? { cert: join(root, "cert.pem"), key: join(root, "key.pem") }
+    : undefined;
+if (tls)
+  execFileSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      tls.key,
+      "-out",
+      tls.cert,
+      "-days",
+      "1",
+      "-subj",
+      "/CN=localhost",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1,DNS:localhost",
+    ],
+    { stdio: "ignore" },
+  );
 writeFileSync(
   configPath,
   JSON.stringify({
     defaults: { model: "mock/mock-model", thinking: "medium" },
-    daemon: { unixSocket: socket, worker: { minWorkers: 0, maxWorkers: 3, idleTtlMs: 1000 } },
+    daemon: {
+      unixSocket: socket,
+      worker: { minWorkers: 0, maxWorkers: 8, idleTtlMs: 1000 },
+      tcp: { enabled: true, port: 0, authToken: "mock-secret", ...(tls ? { tls } : {}) },
+    },
     servers: { local: { endpoint: `unix://${socket}` } },
   }),
 );
@@ -84,29 +114,62 @@ try {
     5_000,
     () => `daemon stdout:\n${daemonStdout}\ndaemon stderr:\n${daemonStderr}`,
   );
-  const base = [...entryArgs, "--config", configPath, "--connect", `unix://${socket}`];
-  await cli([...base, "servers", "ping"]);
-  const started = await cli([
-    ...base,
-    "--json",
-    "--no-wait",
-    "new",
-    "--cwd",
-    workdir,
-    "--name",
-    "mock",
-  ]);
-  const parsed = JSON.parse(started);
-  await cli([...base, "list", "--cwd", workdir]);
-  await cli([...base, "status", parsed.threadId]);
-  await cli([...base, "messages", parsed.threadId]);
-  await cli([...base, "name", parsed.threadId, "renamed"]);
-  await cli([...base, "models"]);
-  const prompted = await cli([...base, "new", "--cwd", workdir, "hi"]);
-  if (/worker\.started|message\.delta|turn\.started/.test(prompted)) {
-    throw new Error(`default streaming leaked raw daemon events:\n${prompted}`);
+  const localBase = [...entryArgs, "--config", configPath, "--connect", `unix://${socket}`];
+  const status = JSON.parse(await cli([...localBase, "--json", "daemon", "status"]));
+  const endpoints = status.transports as string[];
+  for (const endpoint of endpoints) {
+    const base = [
+      ...entryArgs,
+      "--config",
+      configPath,
+      "--connect",
+      endpoint,
+      "--auth-token",
+      "mock-secret",
+      ...(tls ? ["--tls-ca", tls.cert] : []),
+    ];
+    await cli([...base, "servers", "ping"]);
+    const started = await cli([
+      ...base,
+      "--json",
+      "--no-wait",
+      "new",
+      "--cwd",
+      workdir,
+      "--name",
+      "mock",
+    ]);
+    const parsed = JSON.parse(started);
+    await cli([...base, "list", "--cwd", workdir]);
+    await cli([...base, "status", parsed.threadId]);
+    await cli([...base, "messages", parsed.threadId]);
+    await cli([...base, "name", parsed.threadId, "renamed"]);
+    await cli([...base, "models"]);
+    const prompted = await cli([...base, "new", "--cwd", workdir, "hi"]);
+    if (/worker\.started|message\.delta|turn\.started/.test(prompted)) {
+      throw new Error(`default streaming leaked raw daemon events:\n${prompted}`);
+    }
+    const streamed = await cli([
+      ...base,
+      "--json",
+      "--stream",
+      "send",
+      parsed.threadId,
+      "stream this",
+    ]);
+    const frames = streamed
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    if (
+      frames[0]?.status !== "accepted" ||
+      frames.at(-1)?.type !== "turn.completed" ||
+      !frames.some((frame) => frame.type === "message.delta")
+    ) {
+      throw new Error(`incomplete streamed turn over ${endpoint}: ${streamed}`);
+    }
   }
-  await cli([...base, "daemon", "stop"]);
+  await cli([...localBase, "daemon", "stop"]);
   console.log("mock smoke passed");
 } finally {
   daemon.kill("SIGTERM");

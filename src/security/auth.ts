@@ -48,7 +48,7 @@ export function assertOriginAllowed(allowedOrigins: string[] | undefined, origin
     return;
   }
   if (!allowedOrigins?.includes(origin)) {
-    throw new DaemonError("forbidden", "WebSocket Origin rejected", { origin });
+    throw new DaemonError("forbidden", "Origin rejected", { origin });
   }
 }
 

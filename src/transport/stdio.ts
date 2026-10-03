@@ -15,7 +15,7 @@ export function startStdioServer(options: {
   });
   stream.once("end", () => void options.onShutdown?.());
   return {
-    name: "stdio",
+    names: ["stdio"],
     close: async () => {
       connection.close();
       stream.destroy();

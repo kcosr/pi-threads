@@ -11,7 +11,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .name("pi-threads")
     .version(VERSION)
     .option("--config <path>")
-    .option("--connect <endpoint>")
+    .option("--connect <endpoint>", "Daemon endpoint: unix://, http://, https://, ws://, or wss://")
     .option("--server <alias>")
     .option("--json")
     .option("--stream")

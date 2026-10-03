@@ -11,7 +11,7 @@ through local transports.
 
 This repository is not a Pi modification. It starts external Pi RPC
 subprocesses, keeps daemon state in memory, and exposes Unix socket, stdio, and
-opt-in secured WebSocket JSON-RPC transports over one core service API.
+opt-in secured HTTP/SSE and WebSocket RPC transports over one core service API.
 
 ## How It Works
 
@@ -37,14 +37,14 @@ first.
   and named client endpoints.
 - Local Unix socket daemon transport by default.
 - Parent-owned stdio daemon transport for embedding.
-- Opt-in WebSocket transport with bearer-token auth, Origin checks, and TLS
+- Opt-in HTTP/SSE and WebSocket transports with bearer-token auth, Origin checks, and TLS
   requirements for non-loopback binds.
 - Cwd-aware worker scheduling for new Pi sessions.
 - In-memory worker pool with configurable `minWorkers`, `maxWorkers`, and idle
   reaping down to `minWorkers`.
 - Thread list, search, detail, status, and flattened message history commands.
 - Prompted `new` and `send` commands that wait by default, can stream progress,
-  and support JSON final output or NDJSON event streams.
+  and support JSON acceptance output or NDJSON event streams.
 - Default model and thinking configuration for new Pi sessions.
 - Active-turn `steer`, `follow-up`, and `abort`.
 - Pi session `fork`, `clone`, `name`, `settings`, `models`, `usage`,
@@ -307,12 +307,12 @@ Daemon worker fields:
 | `daemon.worker.minWorkers` | Number of workers to prewarm and maintain. Default `0`. |
 | `daemon.worker.maxWorkers` | Maximum worker processes. Default `4`; minimum `1`. |
 | `daemon.worker.idleTtlMs` | Idle time before non-running workers are reaped down to `minWorkers`. Default `300000`. |
-| `daemon.tcp.enabled` | Enable WebSocket JSON-RPC transport. Default `false`. |
-| `daemon.tcp.bind` | WebSocket bind address. Default `127.0.0.1`. |
-| `daemon.tcp.port` | WebSocket port. Default `8765`. |
+| `daemon.tcp.enabled` | Enable HTTP RPC/SSE and WebSocket transports. Default `false`. |
+| `daemon.tcp.bind` | HTTP/WebSocket bind address. Default `127.0.0.1`. |
+| `daemon.tcp.port` | HTTP/WebSocket port. Default `8765`. |
 | `daemon.tcp.authToken` | Inline bearer token. Prefer `authTokenEnv` on shared systems. |
 | `daemon.tcp.authTokenEnv` | Environment variable containing the bearer token. |
-| `daemon.tcp.allowedOrigins` | Allowed WebSocket Origin values. Empty allows no browser origins. |
+| `daemon.tcp.allowedOrigins` | Allowed HTTP/WebSocket Origin values. Empty allows no browser origins. |
 | `daemon.tcp.tls.ca` | Reserved server CA field; it does not enable client-certificate/mTLS authorization today. |
 | `daemon.tcp.tls.cert` | TLS certificate path. Required with `key` for TLS. |
 | `daemon.tcp.tls.key` | TLS private key path. Required with `cert` for TLS. |
@@ -321,10 +321,10 @@ Server alias fields:
 
 | Field | Purpose |
 | --- | --- |
-| `endpoint` | `unix://`, `ws://`, or `wss://` endpoint. |
-| `authToken` | Inline bearer token for WebSocket endpoints. Prefer `authTokenEnv`. |
+| `endpoint` | `unix://`, `http://`, `https://`, `ws://`, or `wss://` endpoint. |
+| `authToken` | Inline bearer token for HTTP/WebSocket endpoints. Prefer `authTokenEnv`. |
 | `authTokenEnv` | Environment variable containing the bearer token. |
-| `tlsCa` | CA file used by the client for `wss://` endpoints. |
+| `tlsCa` | CA file used by the client for `https://` and `wss://` endpoints. |
 
 New-session defaults:
 
@@ -444,15 +444,11 @@ readable blocks.
 acknowledgement commands, `--no-wait` turn commands, and blocking turn
 commands.
 
-Blocking `new PROMPT --json` and `send --json` include:
-
-- `threadId`
-- `turnId`
-- `workerId`
-- `status`
-- `progress`
-- `assistantResponses`
-- `finalAssistantText`
+Blocking `new PROMPT --json` and `send --json` print the acceptance object
+(`threadId`, `turnId`, `workerId`, and `status: "accepted"`), then wait for a
+terminal event. They do not append a final response summary. Use `messages` to
+read the resulting transcript, or `--json --stream` to consume complete event
+payloads, including assistant text and terminal outcome.
 
 `--json --stream` is available for prompted `new` and `send`. It emits NDJSON:
 one accepted event, zero or more progress events, and one terminal event.
@@ -463,7 +459,9 @@ to the accepted Pi agent run and is not a durable Pi transcript id.
 
 Prompted `new` and `send` wait by default until `turn.completed`,
 `turn.aborted`, or `turn.failed`. Use `--no-wait` to return after acceptance.
-Use `--stream` for filtered human progress for the accepted turn.
+Use `--stream` for event names and IDs for the accepted turn. `--no-wait` takes
+precedence over `--stream` and returns acceptance only. Promptless `new` also
+returns acceptance without waiting, even with `--stream`.
 
 Exit codes:
 
@@ -506,19 +504,120 @@ never use native Pi concurrently with a thread controlled by `pi-threads`.
 
 ## Transports And Security
 
+Event subscriptions are live-only unless `sinceEventId` is supplied. Event IDs
+are opaque daemon-instance-qualified cursors. Resuming an expired cursor or one
+from a previous daemon instance fails with `eventHistoryLost`; malformed/future
+cursors fail with `invalidParams`. Replay holds at most 1,000 events in memory.
+Events are delivered in publication order, including nested lifecycle events.
+
+
 - Unix socket JSON-RPC JSONL is the default local transport.
 - stdio JSON-RPC JSONL is available via `pi-threads daemon start --stdio`.
-- WebSocket JSON-RPC is opt-in through config.
-- Non-loopback WebSocket requires TLS cert/key and bearer token auth.
-- TCP/WebSocket auth uses static bearer tokens from config or env.
-- WebSocket Origin validation is supported through `allowedOrigins`.
+- HTTP RPC/SSE and WebSocket RPC are opt-in through config.
+- Non-loopback HTTP/WebSocket requires TLS cert/key and bearer token auth.
+- Network auth uses static bearer tokens from config or env.
+- HTTP/WebSocket Origin validation is supported through `allowedOrigins`.
 - Cookie or ambient browser auth is intentionally not used.
 
 TCP access is shell-equivalent capability because Pi can execute commands and
 mutate files. Treat tokens and TLS keys accordingly. Prefer `authTokenEnv` over
 literal tokens in config files on shared systems.
 
+## HTTP RPC and streaming
+
+With `daemon.tcp.enabled: true`, one listener serves `POST /rpc`, `GET /events`,
+and WebSocket upgrades at `/`. Its default address is `http://127.0.0.1:8765`.
+TLS configuration changes it to HTTPS/WSS. Network access is disabled by default.
+
+POST the existing single-request RPC envelope with `Content-Type: application/json`.
+`Accept: application/json` (also the default) returns one RPC result or error:
+
+```bash
+curl http://127.0.0.1:8765/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/status","params":{}}'
+```
+
+To submit a turn and stream through completion, request SSE:
+
+```bash
+curl -N http://127.0.0.1:8765/rpc \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"thread/send","params":{"threadId":"THREAD_ID","prompt":"Fix the tests"}}'
+```
+
+Finite streaming supports only `thread/start` and `thread/send`. The response is
+`text/event-stream`, with these frame types:
+
+- `response`: the existing RPC acceptance response, or an RPC error if admission
+  fails. Acceptance means the daemon owns the work, not that execution succeeded.
+- `thread/event`: an existing `{jsonrpc:"2.0",method:"thread/event",params:EVENT}`
+  notification. `EVENT` includes `eventId`, `timestamp`, `type`, applicable thread,
+  turn and worker IDs, and the original `payload`. Text deltas remain nested in
+  Pi's message-update payload. Each notification includes its cursor as SSE `id`.
+- `stream/error`: a notification with `params: {code,message}` for observation
+  failures such as overflow or shutdown. This is distinct from `turn.failed`.
+
+The acceptance response precedes all events. Only events for its exact thread
+and turn are streamed. The first `turn.completed`, `turn.failed`, or `turn.aborted`
+ends the response after that event. EOF without a terminal event is interruption.
+There is no additional final-text aggregation or `[DONE]` sentinel.
+
+`GET /events` owns a live subscription until its response closes. Query filters
+are `threadId`, `turnId`, and comma-separated `eventTypes`. Resume retained events
+with `Last-Event-ID: CURSOR` or a `sinceEventId` query parameter. Conflicting
+cursors, duplicate filters, unknown filters and invalid event types are rejected.
+An expired or prior-instance cursor returns HTTP 409 with `eventHistoryLost`.
+Replay remains in memory and cannot recover events beyond the retention window.
+
+Disconnecting an HTTP stream only stops observation. Abort work explicitly with
+`thread/abort`. Never automatically resubmit a POST after losing its response:
+RPC request IDs correlate responses and do not deduplicate commands.
+
+HTTP requests are limited to 1 MiB. Each stream buffer and SSE frame is limited
+to 4 MiB; stalled response writers are disconnected after 30 seconds without
+backpressure relief. SSE sends heartbeat comments every 15 seconds when writable.
+Reverse proxies must allow long responses and disable response buffering; the
+server sends `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
+
+Bearer tokens and TLS use the same configuration as WebSocket. All supplied
+Origins must match `allowedOrigins`, including on loopback; an empty list denies
+browser origins. Allowed origins receive CORS headers and OPTIONS preflight
+support. Browser clients use streaming `fetch` for POST or GET with an explicit
+Authorization header. No cookies or query-string tokens are used.
+
+Malformed HTTP/envelopes and transport policy errors use HTTP 4xx/5xx plus the
+RPC error envelope. Dispatched ordinary RPC calls return HTTP 200 with either
+`result` or `error`. Once SSE begins, errors use the frames described above.
+The existing RPC contract uses string error codes, has no batch support, and
+responds to requests without IDs with `id:null`; it is not a generic JSON-RPC
+2.0 conformance implementation. HTTP uses that same contract.
+
+The CLI accepts an HTTP(S) base endpoint using the existing options:
+
+```bash
+pi-threads --connect http://127.0.0.1:8765 --json --stream send THREAD_ID "Fix the tests"
+pi-threads --connect https://daemon.example:8765 --tls-ca /path/to/ca.pem \
+  --auth-token-env PI_THREADS_AUTH_TOKEN --no-wait send THREAD_ID "Fix the tests"
+```
+
+Default prompted CLI waits use a single streaming POST over HTTP. Ordinary
+commands and `--no-wait` use JSON responses. Named server aliases support the
+same endpoint schemes and credentials. HTTP endpoint paths are base prefixes
+(for reverse proxies), not the `/rpc` route itself.
+
+The source `DaemonClient` exposes `request(method, params)`,
+`streamTurn(method, params)`, and `subscribe(filter)`. The latter two return
+owned async-iterable streams with `close()`. Subscription creation resolves after
+registration, so it is safe to subscribe and then submit work. Socket streams
+use dedicated connections to avoid duplicated notifications from overlapping
+subscriptions. Closing a stream releases that connection/response; closing the
+client releases all of its requests and streams. Neither operation aborts work.
+
 ## Tests And Smoke
+
+Tests require `openssl` on PATH to generate ephemeral local TLS certificates.
 
 Required checks for source changes:
 
@@ -674,14 +773,14 @@ failed startup cleans up transports already opened.
   RPC/session surfaces available in the supported version.
 - Loaded-worker `messages` reflects Pi's current context; unloaded-session
   `messages` reads persisted message entries, including historical branches.
-- Raw TCP JSONL is not enabled; WebSocket is the TCP transport.
+- Raw TCP JSONL is not enabled; HTTP/SSE and WebSocket are the network transports.
 
 ## Project Structure
 
 - `src/cli/` - command parser, runtime, rendering, and completions.
 - `src/service/` - core service, event bus, and daemon method orchestration.
 - `src/session/` - Pi session catalog and JSONL reads.
-- `src/transport/` - Unix socket, stdio, and WebSocket adapters.
+- `src/transport/` - Unix socket, stdio, HTTP/SSE, and WebSocket adapters.
 - `src/worker/` - Pi RPC worker and worker pool.
 - `test/` - focused unit and integration-style tests.
 - `smoke/` - mock and opt-in live smoke harnesses.

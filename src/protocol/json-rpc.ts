@@ -68,3 +68,13 @@ export function parseJsonRpcLine(line: string): JsonRpcRequest {
 export function encodeJsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
+
+export function normalizeParams(params: unknown): Record<string, any> {
+  if (params === undefined || params === null) {
+    return {};
+  }
+  if (typeof params !== "object" || Array.isArray(params)) {
+    throw new DaemonError("invalidParams", "JSON-RPC params must be an object");
+  }
+  return params as Record<string, any>;
+}

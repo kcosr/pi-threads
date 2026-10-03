@@ -2,6 +2,7 @@ import type { Duplex } from "node:stream";
 import { DaemonError } from "../errors.ts";
 import {
   encodeJsonLine,
+  normalizeParams,
   failure,
   parseJsonRpcLine,
   success,
@@ -109,14 +110,4 @@ export class JsonRpcConnection {
     }
     this.options.stream.write(encodeJsonLine(value), () => onWritten?.());
   }
-}
-
-function normalizeParams(params: unknown): Record<string, any> {
-  if (params === undefined || params === null) {
-    return {};
-  }
-  if (typeof params !== "object" || Array.isArray(params)) {
-    throw new DaemonError("invalidParams", "JSON-RPC params must be an object");
-  }
-  return params as Record<string, any>;
 }

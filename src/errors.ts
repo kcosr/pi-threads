@@ -9,6 +9,9 @@ export type ErrorCode =
   | "workerCrashed"
   | "piRpcError"
   | "timeout"
+  | "eventHistoryLost"
+  | "streamInterrupted"
+  | "streamOverflow"
   | "internal";
 
 export class DaemonError extends Error {
