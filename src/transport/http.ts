@@ -189,7 +189,7 @@ async function handleRequest(
     eventQuality > 0 &&
     (eventQuality > jsonQuality ||
       (eventQuality === jsonQuality &&
-        (request.headers.accept ?? "").includes("text/event-stream")));
+        (request.headers.accept ?? "").toLowerCase().includes("text/event-stream")));
   if (!streaming && !accepts(request, "application/json"))
     throw new HttpError(406, new DaemonError("invalidParams", "Unsupported response format"));
   let rpc: JsonRpcRequest | undefined;

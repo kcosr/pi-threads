@@ -228,6 +228,20 @@ describe("HTTP RPC and SSE", () => {
     });
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-headers")).toContain("Authorization");
+    for (const [method, headers, status] of [
+      ["GET", "authorization", 405],
+      ["POST", "x-custom", 403],
+    ] as const) {
+      const rejected = await fetch(`${f.base}/rpc`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://app.example",
+          "Access-Control-Request-Method": method,
+          "Access-Control-Request-Headers": headers,
+        },
+      });
+      expect(rejected.status).toBe(status);
+    }
     expect((await fetch(`${f.base}/events`)).status).toBe(401);
   });
 
@@ -266,6 +280,11 @@ describe("HTTP RPC and SSE", () => {
       headers: { Accept: "text/event-stream;q=0, */*;q=1" },
     });
     expect(excluded.status).toBe(406);
+    const uppercase = await f.post("thread/send", {}, false, {
+      Accept: "APPLICATION/JSON, TEXT/EVENT-STREAM",
+    });
+    expect(uppercase.headers.get("content-type")).toContain("text/event-stream");
+    expect(frames(await uppercase.text()).at(-1)!.data.params.type).toBe("turn.completed");
   });
 
   it("preserves parsed request IDs on validation failures", async () => {

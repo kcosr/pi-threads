@@ -163,6 +163,34 @@ describe("daemon transports", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
   });
 
+  it("enforces bearer credentials and origins for WebSocket upgrades on the shared listener", async () => {
+    const transport = track(
+      await startNetworkServer({
+        bind: "127.0.0.1",
+        port: 0,
+        auth: { token: "secret", allowedOrigins: ["https://app.example"] },
+        service: service(),
+      }),
+    );
+    for (const headers of [
+      { Origin: "https://app.example" },
+      { Origin: "https://app.example", Authorization: "Bearer wrong" },
+      { Origin: "https://evil.example", Authorization: "Bearer secret" },
+    ]) {
+      const socket = new WebSocket(transport.names[1]!, { headers });
+      cleanups.push(() => socket.terminate());
+      await expect(once(socket, "open")).rejects.toThrow("401");
+    }
+    const socket = new WebSocket(transport.names[1]!, {
+      headers: { Origin: "https://app.example", Authorization: "Bearer secret" },
+    });
+    cleanups.push(() => socket.terminate());
+    await once(socket, "open");
+    const response = once(socket, "message");
+    socket.send('{"jsonrpc":"2.0","id":"auth","method":"server/status"}');
+    expect(JSON.parse(String((await response)[0])).result).toEqual({ ok: true });
+  });
+
   it("cleans up an already-open Unix transport when later daemon startup fails", async () => {
     const occupied = net.createServer();
     await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
