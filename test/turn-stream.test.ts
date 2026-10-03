@@ -137,6 +137,38 @@ describe("turn streams", () => {
     expect(f.dispose).toHaveBeenCalledOnce();
   });
 
+  it("settles waiting consumers even when disposal throws", async () => {
+    const stream = new BufferedStream<string>(() => {
+      throw new Error("cleanup failed");
+    });
+    const next = stream.next();
+    stream.finish();
+    await expect(next).rejects.toThrow("cleanup failed");
+    const failed = new BufferedStream<string>(() => {
+      throw new Error("cleanup failed");
+    });
+    const waiting = failed.next();
+    failed.fail(new Error("original failure"));
+    await expect(waiting).rejects.toThrow("original failure");
+  });
+
+  it.each([
+    null,
+    undefined,
+    false,
+    0,
+    "",
+  ])("preserves falsy rejection reasons: %s", async (reason) => {
+    const stream = new BufferedStream<string>();
+    stream.fail(reason);
+    await expect(
+      stream.next().then(
+        () => "unexpected success",
+        (error) => error,
+      ),
+    ).resolves.toBe(reason);
+  });
+
   it("bounds slow consumers and disposes on iterator return", async () => {
     const dispose = vi.fn();
     const stream = new BufferedStream<string>(dispose, 10);

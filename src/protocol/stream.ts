@@ -8,6 +8,7 @@ export class BufferedStream<T> implements AsyncIterableIterator<T> {
   private bytes = 0;
   private ended = false;
   private error: unknown;
+  private failed = false;
   private waiter:
     | { resolve: (item: IteratorResult<T>) => void; reject: (error: unknown) => void }
     | undefined;
@@ -41,24 +42,38 @@ export class BufferedStream<T> implements AsyncIterableIterator<T> {
   finish(): void {
     if (this.ended) return;
     this.ended = true;
-    this.onClose();
-    this.waiter?.resolve({ value: undefined, done: true });
-    this.waiter = undefined;
+    this.settle();
   }
 
   fail(error: unknown): void {
     if (this.ended) return;
     this.error = error;
+    this.failed = true;
     this.queue.length = 0;
     this.bytes = 0;
     this.ended = true;
-    this.onClose();
-    this.waiter?.reject(error);
-    this.waiter = undefined;
+    this.settle();
+  }
+
+  private settle(): void {
+    try {
+      this.onClose();
+    } catch (error) {
+      if (!this.failed) {
+        this.failed = true;
+        this.error = error;
+      }
+      this.queue.length = 0;
+      this.bytes = 0;
+    } finally {
+      if (this.failed) this.waiter?.reject(this.error);
+      else this.waiter?.resolve({ value: undefined, done: true });
+      this.waiter = undefined;
+    }
   }
 
   next(): Promise<IteratorResult<T>> {
-    if (this.error) return Promise.reject(this.error);
+    if (this.failed) return Promise.reject(this.error);
     const item = this.queue.shift();
     if (item) {
       this.bytes -= item.bytes;
