@@ -17,6 +17,9 @@ Unix sockets, stdio, WebSocket, and HTTP. Network access stays opt-in through
   generic JSON-RPC batch/notification support.
 
 Capture events before submitting work and emit acceptance before buffered events.
+For send, resolve session paths to canonical IDs before subscribing to that thread.
+Start has no thread ID before admission and temporarily captures all live events;
+its bounded pre-acceptance buffer can overflow under concurrent daemon traffic.
 Disconnects stop observation, never abort execution or retry a command. EOF before
 a terminal event is interruption. Bound request and stream buffers; slow observers
 must not block workers. Heartbeats keep otherwise quiet streams active.

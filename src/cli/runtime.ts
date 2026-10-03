@@ -1,3 +1,4 @@
+import { isTerminalEventType } from "../protocol/events.ts";
 import { writeFileSync } from "node:fs";
 import { DaemonClient } from "../client/daemon-client.ts";
 import { loadConfig, resolveClientConfig } from "../config.ts";
@@ -75,7 +76,7 @@ export class CliRuntime {
       if (options.stream) {
         renderEvent(event, Boolean(options.json));
       }
-      if (isTerminalTurnEvent(event.type)) {
+      if (isTerminalEventType(event.type)) {
         terminal = event;
         finishWaiting();
       }
@@ -193,8 +194,4 @@ function eventMatchesAccepted(
     return event.threadId === accepted.threadId;
   }
   return false;
-}
-
-function isTerminalTurnEvent(type: string): boolean {
-  return type === "turn.completed" || type === "turn.aborted" || type === "turn.failed";
 }

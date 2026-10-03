@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { PiThreadsConfig } from "../config.ts";
 import { DaemonError } from "../errors.ts";
-import type { DaemonEvent, EventFilter } from "../protocol/events.ts";
+import { isTerminalEventType, type DaemonEvent, type EventFilter } from "../protocol/events.ts";
 import type {
   AcceptedTurn,
   QueuedFollowUp,
@@ -790,7 +790,7 @@ export class PiThreadsService {
       active.hasAgentRun = true;
       return;
     }
-    if (!isTerminalDaemonEvent(event.type)) {
+    if (!isTerminalEventType(event.type)) {
       return;
     }
     this.activeTurns.delete(event.threadId);
@@ -1068,8 +1068,4 @@ function assertNotCancelled(response: { data?: unknown }, command: string): void
   ) {
     throw new DaemonError("piRpcError", "Pi RPC command was cancelled", { command });
   }
-}
-
-function isTerminalDaemonEvent(type: string): boolean {
-  return type === "turn.completed" || type === "turn.failed" || type === "turn.aborted";
 }

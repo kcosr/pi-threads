@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTurnStream, type TurnSource } from "../src/protocol/turn-stream.ts";
+import { EventBus } from "../src/service/event-bus.ts";
 import { BufferedStream } from "../src/protocol/stream.ts";
 import type { DaemonEvent } from "../src/protocol/events.ts";
 import type { AcceptedTurn } from "../src/protocol/types.ts";
@@ -25,6 +26,7 @@ function fixture(
   let fail!: (error: unknown) => void;
   const dispose = vi.fn();
   const source: TurnSource = {
+    resolveThreadId: async (input) => input,
     subscribe: (_filter, listener, onError) => {
       send = listener;
       fail = onError;
@@ -49,7 +51,7 @@ describe("turn streams", () => {
       send(event("turn.completed"));
       return accepted;
     });
-    const frames = await collect(createTurnStream(f.source, "thread/send", {}));
+    const frames = await collect(createTurnStream(f.source, "thread/send", { threadId: "thread" }));
     expect(frames).toEqual([
       { type: "accepted", result: accepted },
       { type: "event", event: event("message.delta") },
@@ -74,12 +76,12 @@ describe("turn streams", () => {
     const f = fixture(() => {
       throw new Error("admission failed");
     });
-    await expect(createTurnStream(f.source, "thread/send", {}).next()).rejects.toThrow(
-      "admission failed",
-    );
+    await expect(
+      createTurnStream(f.source, "thread/send", { threadId: "thread" }).next(),
+    ).rejects.toThrow("admission failed");
     expect(f.dispose).toHaveBeenCalledOnce();
     const g = fixture(() => accepted);
-    const stream = createTurnStream(g.source, "thread/send", {});
+    const stream = createTurnStream(g.source, "thread/send", { threadId: "thread" });
     await stream.next();
     const next = stream.next();
     g.fail(new Error("disconnected"));
@@ -94,17 +96,20 @@ describe("turn streams", () => {
     const stream = createTurnStream(
       {
         request,
+        resolveThreadId: async (input) => input,
         subscribe: () =>
           new Promise((resolve) => {
             subscribed = resolve;
           }),
       },
       "thread/send",
-      {},
+      { threadId: "thread" },
     );
+    await vi.waitFor(() => expect(subscribed).toBeTypeOf("function"));
     const next = stream.next();
     await stream.close();
     await expect(next).resolves.toMatchObject({ done: true });
+    await vi.waitFor(() => expect(subscribed).toBeTypeOf("function"));
     subscribed(dispose);
     await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
     expect(request).not.toHaveBeenCalled();
@@ -118,7 +123,7 @@ describe("turn streams", () => {
           resolve = done;
         }),
     );
-    const stream = createTurnStream(f.source, "thread/send", {});
+    const stream = createTurnStream(f.source, "thread/send", { threadId: "thread" });
     await vi.waitFor(() => expect(f.source.request).toHaveBeenCalledOnce());
     await stream.close();
     resolve(accepted);
@@ -131,10 +136,57 @@ describe("turn streams", () => {
       send({ ...event("message.delta"), payload: { text: "x".repeat(1024) } });
       return accepted;
     });
-    await expect(createTurnStream(f.source, "thread/send", {}, 256).next()).rejects.toMatchObject({
+    await expect(
+      createTurnStream(f.source, "thread/send", { threadId: "thread" }, 256).next(),
+    ).rejects.toMatchObject({
       code: "streamOverflow",
     });
     expect(f.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("bounds matching events after acceptance and disposes once", async () => {
+    const f = fixture(() => accepted);
+    const stream = createTurnStream(f.source, "thread/send", { threadId: "thread" }, 512);
+    await stream.next();
+    for (let i = 0; i < 10; i++) f.send(event("message.delta"));
+    await expect(stream.next()).rejects.toMatchObject({ code: "streamOverflow" });
+    expect(f.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("resolves a session path before subscribing to the canonical thread", async () => {
+    const f = fixture((send) => {
+      send(event("turn.completed"));
+      return accepted;
+    });
+    f.source.resolveThreadId = vi.fn(async () => "thread");
+    const subscribe = vi.spyOn(f.source, "subscribe");
+    await collect(createTurnStream(f.source, "thread/send", { threadId: "/session.jsonl" }));
+    expect(subscribe.mock.calls[0]![0]).toEqual({ threadId: "thread" });
+    expect(f.source.request).toHaveBeenCalledWith("thread/send", { threadId: "thread" });
+  });
+
+  it("does not count unrelated thread traffic against pending admission", async () => {
+    const bus = new EventBus();
+    let admit!: (value: AcceptedTurn) => void;
+    const source: TurnSource = {
+      resolveThreadId: async () => "thread",
+      request: () =>
+        new Promise((resolve) => {
+          admit = resolve;
+        }),
+      subscribe: (filter, listener) => {
+        const id = bus.subscribe(filter, listener);
+        return () => {
+          bus.unsubscribe(id);
+        };
+      },
+    };
+    const stream = createTurnStream(source, "thread/send", { threadId: "/session.jsonl" }, 512);
+    await vi.waitFor(() => expect(admit).toBeTypeOf("function"));
+    bus.emit({ type: "message.delta", threadId: "other", payload: { text: "x".repeat(1024) } });
+    bus.emit({ type: "turn.completed", threadId: "thread", turnId: "turn", payload: {} });
+    admit(accepted);
+    expect(await collect(stream)).toHaveLength(2);
   });
 
   it("settles waiting consumers even when disposal throws", async () => {
@@ -177,7 +229,7 @@ describe("turn streams", () => {
     await expect(stream.next()).rejects.toMatchObject({ code: "streamOverflow" });
     expect(dispose).toHaveBeenCalledOnce();
     const f = fixture(() => accepted);
-    const turns = createTurnStream(f.source, "thread/send", {});
+    const turns = createTurnStream(f.source, "thread/send", { threadId: "thread" });
     for await (const _frame of turns) break;
     expect(f.dispose).toHaveBeenCalledOnce();
   });

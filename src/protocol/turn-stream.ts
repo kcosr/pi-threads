@@ -1,5 +1,5 @@
 import { DaemonError } from "../errors.ts";
-import type { DaemonEvent, EventFilter } from "./events.ts";
+import { isTerminalEventType, type DaemonEvent, type EventFilter } from "./events.ts";
 import type { AcceptedTurn } from "./types.ts";
 import { BufferedStream, MAX_STREAM_BYTES } from "./stream.ts";
 
@@ -8,6 +8,7 @@ export type TurnFrame =
   | { type: "accepted"; result: AcceptedTurn }
   | { type: "event"; event: DaemonEvent };
 export interface TurnSource {
+  resolveThreadId(input: string): Promise<string>;
   request(method: TurnMethod, params: Record<string, unknown>): Promise<AcceptedTurn>;
   subscribe(
     filter: EventFilter,
@@ -17,7 +18,7 @@ export interface TurnSource {
 }
 
 export function isTerminalEvent(event: DaemonEvent): boolean {
-  return ["turn.completed", "turn.failed", "turn.aborted"].includes(event.type);
+  return isTerminalEventType(event.type);
 }
 
 export function assertTurnMethod(method: string): asserts method is TurnMethod {
@@ -61,12 +62,22 @@ export function createTurnStream(
     if (isTerminalEvent(event)) stream.finish();
   };
   void (async () => {
-    dispose = await source.subscribe({}, deliver, (error) => stream.fail(error));
+    let input = params;
+    const filter: EventFilter = {};
+    if (method === "thread/send") {
+      if (typeof params.threadId !== "string" || !params.threadId) {
+        throw new DaemonError("invalidParams", "threadId is required");
+      }
+      filter.threadId = await source.resolveThreadId(params.threadId);
+      input = { ...params, threadId: filter.threadId };
+    }
+    if (stream.closed) return;
+    dispose = await source.subscribe(filter, deliver, (error) => stream.fail(error));
     if (stream.closed) {
       dispose();
       return;
     }
-    accepted = await source.request(method, params);
+    accepted = await source.request(method, input);
     if (stream.closed) return;
     stream.push({ type: "accepted", result: accepted });
     const buffered = pending;

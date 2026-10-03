@@ -43,3 +43,7 @@ export interface EventFilter {
   sinceEventId?: string;
   eventTypes?: DaemonEventType[];
 }
+
+export function isTerminalEventType(type: string): boolean {
+  return type === "turn.completed" || type === "turn.failed" || type === "turn.aborted";
+}
