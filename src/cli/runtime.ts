@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { DaemonClient } from "../client/daemon-client.ts";
 import { loadConfig, resolveClientConfig } from "../config.ts";
 import { startDaemon } from "../daemon.ts";
+import { DaemonError } from "../errors.ts";
 import { printJson, printNdjson, renderEvent, renderHuman, renderThreadRead } from "./render.ts";
 
 export interface GlobalOptions {
@@ -52,7 +53,17 @@ export class CliRuntime {
     const shouldSubscribe = options.stream || shouldWait;
     const bufferedEvents: Array<Parameters<typeof renderEvent>[0]> = [];
     let accepted: { threadId?: string; turnId?: string } | undefined;
-    let terminal = false;
+    let terminal: Parameters<typeof renderEvent>[0] | undefined;
+    let connectionError: Error | undefined;
+    let finishWaiting!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finishWaiting = resolve;
+    });
+    const handleClose = (error: Error) => {
+      connectionError = error;
+      finishWaiting();
+    };
+    client.on("close", handleClose);
     const handleEvent = (event: Parameters<typeof renderEvent>[0]) => {
       if (!accepted) {
         bufferedEvents.push(event);
@@ -65,7 +76,8 @@ export class CliRuntime {
         renderEvent(event, Boolean(options.json));
       }
       if (isTerminalTurnEvent(event.type)) {
-        terminal = true;
+        terminal = event;
+        finishWaiting();
       }
     };
     try {
@@ -86,10 +98,20 @@ export class CliRuntime {
       if (!shouldWait) {
         return;
       }
-      while (!terminal) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      if (!terminal) await finished;
+      if (!terminal && connectionError) throw connectionError;
+      if (terminal?.type === "turn.failed" || terminal?.type === "turn.aborted") {
+        throw new DaemonError(
+          "piRpcError",
+          String(
+            terminal.payload.message ??
+              (terminal.type === "turn.aborted" ? "Pi turn aborted" : "Pi turn failed"),
+          ),
+          terminal.payload,
+        );
       }
     } finally {
+      client.off("close", handleClose);
       await client.close();
     }
   }
@@ -164,7 +186,7 @@ function eventMatchesAccepted(
   event: Parameters<typeof renderEvent>[0],
   accepted: { threadId?: string; turnId?: string },
 ): boolean {
-  if (accepted.turnId && event.turnId) {
+  if (accepted.turnId) {
     return event.turnId === accepted.turnId;
   }
   if (accepted.threadId && event.threadId) {

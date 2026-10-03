@@ -6,6 +6,7 @@ export type DaemonEventType =
   | "message.delta"
   | "message.completed"
   | "tool.started"
+  | "tool.updated"
   | "tool.completed"
   | "retry.scheduled"
   | "retry.completed"

@@ -1,6 +1,5 @@
 import { DaemonError } from "../errors.ts";
 import type { EventBus } from "../service/event-bus.ts";
-import { usesAgentSettledEvent } from "../version.ts";
 import { PiRpcWorker, type PiRpcResponse, type WorkerProcessState } from "./pi-rpc-worker.ts";
 
 export interface WorkerPoolOptions {
@@ -21,6 +20,7 @@ export interface PooledWorker {
   state: WorkerProcessState;
   threadId: string | undefined;
   activeTurnId: string | undefined;
+  abortingTurnId?: string;
   lastUsedAt: Date;
   pid: number | undefined;
   start(): Promise<void>;
@@ -36,6 +36,9 @@ export class WorkerPool {
   private readonly workerFactory: NonNullable<WorkerPoolOptions["workerFactory"]>;
   private reaper: NodeJS.Timeout | undefined;
   private nextWorkerId = 1;
+  private stopped = false;
+  private recoveryTimer: NodeJS.Timeout | undefined;
+  private recoveryDelayMs = 1_000;
 
   constructor(
     private readonly options: WorkerPoolOptions,
@@ -52,6 +55,7 @@ export class WorkerPool {
   }
 
   async start(): Promise<void> {
+    this.stopped = false;
     await this.maintainMinimum();
     if (this.options.idleTtlMs > 0 || this.options.minWorkers > 0) {
       this.reaper = setInterval(
@@ -122,7 +126,9 @@ export class WorkerPool {
         assertNotCancelled(response, "switch_session");
       } catch (error) {
         worker.threadId = previousThreadId;
-        worker.state = previousThreadId ? "assigned" : "idle";
+        if (!isUnavailableWorker(worker)) {
+          worker.state = previousThreadId ? "assigned" : "idle";
+        }
         throw error;
       }
     }
@@ -130,6 +136,9 @@ export class WorkerPool {
   }
 
   release(worker: PooledWorker, threadId?: string): void {
+    if (isUnavailableWorker(worker)) {
+      return;
+    }
     worker.state = worker.threadId ? "assigned" : "idle";
     worker.lastUsedAt = new Date();
     this.events.emit({
@@ -141,15 +150,21 @@ export class WorkerPool {
   }
 
   async stopAll(): Promise<void> {
+    this.stopped = true;
     if (this.reaper) {
       clearInterval(this.reaper);
       this.reaper = undefined;
     }
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = undefined;
     await Promise.all([...this.workers.values()].map((worker) => worker.stop()));
     this.workers.clear();
   }
 
   private async spawn(cwd: string): Promise<PooledWorker> {
+    if (this.stopped) {
+      throw new DaemonError("workerCrashed", "Worker pool is stopped");
+    }
     if (this.workers.size >= this.options.maxWorkers) {
       throw new DaemonError("capacity", "Worker capacity reached", {
         maxWorkers: this.options.maxWorkers,
@@ -167,26 +182,39 @@ export class WorkerPool {
         return;
       }
       this.workers.delete(worker.workerId);
+      const turnId = worker.activeTurnId;
+      worker.activeTurnId = undefined;
       this.events.emit({
         type: "worker.crashed",
         workerId: worker.workerId,
         threadId: worker.threadId,
+        turnId,
         payload: { pid: worker.pid, ...(event as Record<string, unknown>) },
       });
-      void this.maintainMinimum().catch((error) => {
+      if (turnId) {
         this.events.emit({
-          type: "worker.crashed",
+          type: "turn.failed",
           workerId: worker.workerId,
           threadId: worker.threadId,
-          payload: {
-            pid: worker.pid,
-            recoveryFailed: true,
-            message: error instanceof Error ? error.message : String(error),
-          },
+          turnId,
+          payload: { errorCode: "workerCrashed", message: "Pi RPC worker exited" },
         });
-      });
+      }
+      if (Date.now() - worker.startedAt.getTime() >= 60_000) {
+        this.recoveryDelayMs = 1_000;
+      }
+      this.scheduleMinimumRecovery();
     });
-    await worker.start();
+    try {
+      await worker.start();
+      if (this.stopped) {
+        throw new DaemonError("workerCrashed", "Worker pool stopped during worker startup");
+      }
+    } catch (error) {
+      this.workers.delete(worker.workerId);
+      await worker.stop().catch(() => undefined);
+      throw error;
+    }
     this.events.emit({
       type: "worker.started",
       workerId: worker.workerId,
@@ -197,9 +225,31 @@ export class WorkerPool {
 
   private async maintainMinimum(): Promise<void> {
     const target = Math.min(this.options.minWorkers, this.options.maxWorkers);
-    while (this.workers.size < target) {
+    while (!this.stopped && !this.recoveryTimer && this.workers.size < target) {
       await this.spawn(this.options.prewarmCwd ?? process.cwd());
     }
+  }
+
+  private scheduleMinimumRecovery(): void {
+    const target = Math.min(this.options.minWorkers, this.options.maxWorkers);
+    if (this.stopped || this.recoveryTimer || this.workers.size >= target) {
+      return;
+    }
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      void this.maintainMinimum().catch((error) => {
+        this.events.emit({
+          type: "worker.crashed",
+          payload: {
+            recoveryFailed: true,
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+        this.scheduleMinimumRecovery();
+      });
+    }, this.recoveryDelayMs);
+    this.recoveryTimer.unref?.();
+    this.recoveryDelayMs = Math.min(this.recoveryDelayMs * 2, 30_000);
   }
 
   private async reapIdleWorkers(): Promise<void> {
@@ -216,13 +266,14 @@ export class WorkerPool {
       this.workers.delete(worker.workerId);
       await worker.stop();
     }
-    await this.maintainMinimum();
+    this.scheduleMinimumRecovery();
   }
 }
 
 const pendingSettledOutcomes = new WeakMap<
   PooledWorker,
   {
+    turnId: string | undefined;
     piEvent: Record<string, unknown>;
     failure?: ReturnType<typeof agentFailure>;
   }
@@ -261,50 +312,38 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
   }
   if (type === "agent_end") {
     const failure = agentFailure(raw);
-    if (usesAgentSettledEvent(worker.version)) {
-      pendingSettledOutcomes.set(worker, { piEvent: raw, failure });
-      return {
-        type: "thread.updated" as const,
-        workerId: worker.workerId,
-        threadId: worker.threadId,
-        turnId: worker.activeTurnId,
-        payload: {
-          piEvent: raw,
-          status: raw.willRetry === true ? "retrying" : "settling",
-        },
-      };
-    }
-    if (raw.willRetry === true) {
-      return {
-        type: "thread.updated" as const,
-        workerId: worker.workerId,
-        threadId: worker.threadId,
-        turnId: worker.activeTurnId,
-        payload: { piEvent: raw, status: "retrying" },
-      };
-    }
-    worker.state = "assigned";
-    if (failure) {
-      return {
-        type: "turn.failed" as const,
-        workerId: worker.workerId,
-        threadId: worker.threadId,
-        turnId: worker.activeTurnId,
-        payload: { piEvent: raw, status: "failed", ...failure },
-      };
-    }
+    pendingSettledOutcomes.set(worker, { turnId: worker.activeTurnId, piEvent: raw, failure });
     return {
-      type: "turn.completed" as const,
+      type: "thread.updated" as const,
       workerId: worker.workerId,
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
-      payload: { piEvent: raw, status: "completed" },
+      payload: { piEvent: raw, status: raw.willRetry === true ? "retrying" : "settling" },
     };
   }
-  if (type === "agent_settled" && usesAgentSettledEvent(worker.version)) {
+  if (type === "agent_settled") {
     worker.state = "assigned";
-    const outcome = pendingSettledOutcomes.get(worker);
+    const pending = pendingSettledOutcomes.get(worker);
+    const outcome = pending?.turnId === worker.activeTurnId ? pending : undefined;
     pendingSettledOutcomes.delete(worker);
+    if (!worker.activeTurnId) {
+      return {
+        type: "thread.updated" as const,
+        workerId: worker.workerId,
+        threadId: worker.threadId,
+        payload: { piEvent: raw, status: "idle" },
+      };
+    }
+    if (worker.abortingTurnId === worker.activeTurnId) {
+      worker.abortingTurnId = undefined;
+      return {
+        type: "turn.aborted" as const,
+        workerId: worker.workerId,
+        threadId: worker.threadId,
+        turnId: worker.activeTurnId,
+        payload: { piEvent: raw, reason: "client", finalState: "aborted" },
+      };
+    }
     if (outcome?.failure) {
       return {
         type: "turn.failed" as const,
@@ -334,6 +373,15 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
   if (type === "auto_retry_start") {
     return {
       type: "retry.scheduled" as const,
+      workerId: worker.workerId,
+      threadId: worker.threadId,
+      turnId: worker.activeTurnId,
+      payload: raw,
+    };
+  }
+  if (type === "queue_update") {
+    return {
+      type: "queue.updated" as const,
       workerId: worker.workerId,
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
@@ -396,7 +444,8 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
   }
   if (type === "tool_execution_update" || type === "tool_execution_end") {
     return {
-      type: "tool.completed" as const,
+      type:
+        type === "tool_execution_update" ? ("tool.updated" as const) : ("tool.completed" as const),
       workerId: worker.workerId,
       threadId: worker.threadId,
       turnId: worker.activeTurnId,
@@ -428,6 +477,10 @@ function mapWorkerEvent(worker: PooledWorker, event: unknown) {
     turnId: worker.activeTurnId,
     payload: { piEvent: raw },
   };
+}
+
+function isUnavailableWorker(worker: PooledWorker): boolean {
+  return worker.state === "crashed" || worker.state === "stopped";
 }
 
 function assertNotCancelled(response: PiRpcResponse, command: string): void {

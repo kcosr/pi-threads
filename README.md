@@ -78,7 +78,9 @@ install -m 755 pi-threads-<version>-linux-x86_64/pi-threads ~/.local/bin/pi-thre
 pi-threads --help
 ```
 
-`pi-threads` requires the Pi CLI/runtime separately. Ensure the `pi` executable
+`pi-threads` requires the Pi 1.0.x CLI/runtime separately (tested with 1.0.0).
+Pi 0.x, prereleases, and Pi 1.1 or later are rejected. The npm Pi CLI requires
+Node.js 22.19 or newer. Ensure the `pi` executable
 is on `PATH`, or set `PI_THREADS_PI_BIN=/path/to/pi` for daemon and smoke
 commands. Worker startup probes `pi --version` with a 15 second timeout and
 sets Pi's startup network opt-outs for the probe and RPC workers
@@ -263,6 +265,12 @@ pi-threads fork THREAD_ID --entry-id ENTRY_ID --name forked
 pi-threads clone THREAD_ID --name cloned
 pi-threads name THREAD_ID "new name"
 ```
+
+Session mutations (`settings set`, `name`, `fork`, `clone`, `compact`, and
+`bash`) require an idle thread and return `busy` while another turn or mutation
+is active. The daemon refreshes its session baseline before subsequent writes.
+Refresh failures emit a `thread.updated` diagnostic with `internalError` and
+`operation: "session.refresh"`, preserving the command's original result or error.
 
 ## Configuration
 
@@ -527,6 +535,15 @@ Mock smoke is deterministic and non-costing:
 bun run smoke:mock
 ```
 
+The Pi integration smoke runs the pinned Pi 1.0.0 executable with disposable
+settings and a local model fixture. It exercises real RPC, handled prompts,
+completion, settings changes, shell output, compaction, abort, failure, and
+worker crash recovery without provider calls:
+
+```bash
+bun run smoke:pi
+```
+
 Live smoke is opt-in and targets real `pi --mode rpc` workers with real model
 turns:
 
@@ -545,7 +562,7 @@ notes.
 
 ## Development
 
-Install dependencies:
+Use Bun 1.3 or newer and Node.js 22.19 or newer. Install dependencies:
 
 ```bash
 bun install
@@ -629,7 +646,20 @@ pi-threads-VERSION-PLATFORM/
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| 0.1.x | 0.75.x through 0.82.x | Current supported range |
+| Next release | 1.0.x (tested: 1.0.0) | Current supported range |
+
+Pi 1.0 runs complete on `agent_settled`; intermediate `agent_end` events retain
+the active turn through retries and queued work. An extension-handled prompt
+that starts no run completes immediately. Steering reports its `disposition`,
+and follow-up reports `status: "queued"` or `status: "handled"`.
+
+Missing executables and command timeouts produce errors. A timed-out worker is
+terminated because its session state can no longer be safely reused. Blocking
+CLI commands exit with an error on failed or aborted turns and daemon disconnects.
+
+Unix socket startup refuses live sockets and non-socket paths; it recovers only
+confirmed stale sockets. Shutdown closes connected clients and workers, and
+failed startup cleans up transports already opened.
 
 ## Known Limitations
 
@@ -642,6 +672,8 @@ pi-threads-VERSION-PLATFORM/
   races.
 - Usage and provider attribution are best-effort and depend on the Pi
   RPC/session surfaces available in the supported version.
+- Loaded-worker `messages` reflects Pi's current context; unloaded-session
+  `messages` reads persisted message entries, including historical branches.
 - Raw TCP JSONL is not enabled; WebSocket is the TCP transport.
 
 ## Project Structure

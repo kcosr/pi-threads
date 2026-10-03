@@ -38,12 +38,13 @@ export interface AcceptedTurn {
   turnId: string;
   workerId: string;
   status: TurnStatusValue;
+  disposition?: "queued" | "handled";
 }
 
 export interface QueuedFollowUp {
   threadId: string;
   queuedForTurnId?: string;
-  status: "queued";
+  status: "queued" | "handled";
 }
 
 export interface WorkerStatus {

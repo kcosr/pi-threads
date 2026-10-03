@@ -1,9 +1,35 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EventBus } from "../src/service/event-bus.ts";
 import type { DaemonEvent } from "../src/protocol/events.ts";
 import { WorkerPool, type PooledWorker } from "../src/worker/worker-pool.ts";
 
 describe("WorkerPool lifecycle", () => {
+  it("returns capacity after worker startup fails", async () => {
+    const created: FakeWorker[] = [];
+    const pool = new WorkerPool(
+      {
+        minWorkers: 0,
+        maxWorkers: 1,
+        idleTtlMs: 300_000,
+        workerFactory: ({ workerId, cwd }) => {
+          const worker = new FakeWorker(workerId, cwd);
+          if (created.length === 0) {
+            worker.start = vi.fn().mockRejectedValue(new Error("unsupported version"));
+          }
+          created.push(worker);
+          return worker;
+        },
+      },
+      new EventBus(),
+    );
+
+    await expect(pool.acquireForNew("/tmp/project")).rejects.toThrow("unsupported version");
+    expect(pool.list()).toEqual([]);
+    expect(created[0]!.state).toBe("stopped");
+    await expect(pool.acquireForNew("/tmp/project")).resolves.toBe(created[1]);
+    await pool.stopAll();
+  });
+
   it("prewarms to minWorkers", async () => {
     const pool = new WorkerPool(
       {
@@ -20,6 +46,16 @@ describe("WorkerPool lifecycle", () => {
 
     expect(pool.list()).toMatchObject([{ cwd: "/tmp/prewarm", state: "idle" }]);
     await pool.stopAll();
+  });
+
+  it("does not start replacement workers after shutdown", async () => {
+    const pool = new WorkerPool(
+      { minWorkers: 0, maxWorkers: 1, idleTtlMs: 300_000, workerFactory: fakeWorkerFactory() },
+      new EventBus(),
+    );
+    await pool.stopAll();
+    await expect(pool.acquireForNew("/tmp/project")).rejects.toThrow("Worker pool is stopped");
+    expect(pool.list()).toEqual([]);
   });
 
   it("reaps idle workers down to minWorkers", async () => {
@@ -44,7 +80,8 @@ describe("WorkerPool lifecycle", () => {
     await pool.stopAll();
   });
 
-  it("removes crashed workers and restores minWorkers", async () => {
+  it("backs off repeated crashes while restoring minWorkers and cancels recovery on shutdown", async () => {
+    vi.useFakeTimers();
     const created: FakeWorker[] = [];
     const pool = new WorkerPool(
       {
@@ -61,12 +98,27 @@ describe("WorkerPool lifecycle", () => {
       new EventBus(),
     );
 
-    await pool.start();
-    created[0]!.crash();
-
-    await eventually(() => expect(pool.list()).toHaveLength(1));
-    expect(pool.list()[0]?.workerId).not.toBe(created[0]!.workerId);
-    await pool.stopAll();
+    try {
+      await pool.start();
+      created[0]!.crash();
+      expect(pool.list()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(created).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pool.list()).toHaveLength(1);
+      created[1]!.crash();
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(created).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(created).toHaveLength(3);
+      created[2]!.crash();
+      await pool.stopAll();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(created).toHaveLength(3);
+    } finally {
+      await pool.stopAll();
+      vi.useRealTimers();
+    }
   });
 
   it("reserves a worker while switching sessions", async () => {
@@ -93,6 +145,23 @@ describe("WorkerPool lifecycle", () => {
 
     expect(newWorker.workerId).not.toBe(created[0]!.workerId);
     await switching;
+    await pool.stopAll();
+  });
+
+  it("preserves a crashed worker state after a failed session switch", async () => {
+    const worker = new FakeWorker("worker-1", "/tmp/project");
+    worker.command = async () => {
+      worker.state = "crashed";
+      throw new Error("command timeout");
+    };
+    const pool = new WorkerPool(
+      { minWorkers: 0, maxWorkers: 1, idleTtlMs: 300_000, workerFactory: () => worker },
+      new EventBus(),
+    );
+    await expect(
+      pool.acquireForSession("thread-1", worker.cwd, "/tmp/session.jsonl"),
+    ).rejects.toThrow("command timeout");
+    expect(worker.state).toBe("crashed");
     await pool.stopAll();
   });
 
@@ -181,6 +250,8 @@ describe("WorkerPool lifecycle", () => {
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "failed" }],
     });
 
+    (worker as FakeWorker).emitEvent({ type: "agent_settled" });
+
     expect(observed.map((event) => event.type)).toContain("message.completed");
     expect(observed.at(-1)).toMatchObject({
       type: "turn.failed",
@@ -189,7 +260,7 @@ describe("WorkerPool lifecycle", () => {
     await pool.stopAll();
   });
 
-  it("waits for agent_settled before completing Pi 0.81 and newer turns", async () => {
+  it("waits for agent_settled before completing Pi 1.0 turns", async () => {
     const events = new EventBus();
     const observed: DaemonEvent[] = [];
     events.subscribe({}, (event) => observed.push(event));
@@ -198,7 +269,7 @@ describe("WorkerPool lifecycle", () => {
         minWorkers: 0,
         maxWorkers: 1,
         idleTtlMs: 300_000,
-        workerFactory: fakeWorkerFactory("0.82.1"),
+        workerFactory: fakeWorkerFactory("1.0.0"),
       },
       events,
     );
@@ -228,7 +299,7 @@ describe("WorkerPool lifecycle", () => {
     await pool.stopAll();
   });
 
-  it("defers Pi 0.81 and newer failures until agent_settled", async () => {
+  it("defers Pi 1.0 failures until agent_settled", async () => {
     const events = new EventBus();
     const observed: DaemonEvent[] = [];
     events.subscribe({}, (event) => observed.push(event));
@@ -237,7 +308,7 @@ describe("WorkerPool lifecycle", () => {
         minWorkers: 0,
         maxWorkers: 1,
         idleTtlMs: 300_000,
-        workerFactory: fakeWorkerFactory("0.82.1"),
+        workerFactory: fakeWorkerFactory("1.0.0"),
       },
       events,
     );
@@ -262,10 +333,72 @@ describe("WorkerPool lifecycle", () => {
     });
     await pool.stopAll();
   });
+
+  it("does not reuse another turn's unsettled failure", async () => {
+    const events = new EventBus();
+    const pool = new WorkerPool(
+      { minWorkers: 0, maxWorkers: 1, idleTtlMs: 300_000, workerFactory: fakeWorkerFactory() },
+      events,
+    );
+    const worker = (await pool.acquireForNew("/tmp/project")) as FakeWorker;
+    worker.threadId = "thread-1";
+    worker.activeTurnId = "turn-1";
+    worker.emitEvent({ type: "agent_end", messages: [{ role: "assistant", stopReason: "error" }] });
+    worker.activeTurnId = "turn-2";
+    worker.emitEvent({ type: "agent_settled" });
+
+    expect(events.eventsSince({}).at(-1)).toMatchObject({
+      type: "turn.completed",
+      turnId: "turn-2",
+    });
+    await pool.stopAll();
+  });
+
+  it("publishes actual queue contents, including queue drain", async () => {
+    const events = new EventBus();
+    const pool = new WorkerPool(
+      { minWorkers: 0, maxWorkers: 1, idleTtlMs: 300_000, workerFactory: fakeWorkerFactory() },
+      events,
+    );
+    const worker = (await pool.acquireForNew("/tmp/project")) as FakeWorker;
+    worker.emitEvent({ type: "queue_update", steering: ["change course"], followUp: [] });
+    worker.emitEvent({ type: "queue_update", steering: [], followUp: [] });
+
+    expect(
+      events.eventsSince({ eventTypes: ["queue.updated"] }).map((event) => event.payload),
+    ).toEqual([
+      { type: "queue_update", steering: ["change course"], followUp: [] },
+      { type: "queue_update", steering: [], followUp: [] },
+    ]);
+    await pool.stopAll();
+  });
+
+  it("distinguishes partial tool output from completed tool calls", async () => {
+    const events = new EventBus();
+    const pool = new WorkerPool(
+      { minWorkers: 0, maxWorkers: 1, idleTtlMs: 300_000, workerFactory: fakeWorkerFactory() },
+      events,
+    );
+    const worker = (await pool.acquireForNew("/tmp/project")) as FakeWorker;
+    worker.emitEvent({ type: "tool_execution_start", toolCallId: "tool-1" });
+    worker.emitEvent({ type: "tool_execution_update", toolCallId: "tool-1", partialResult: {} });
+    worker.emitEvent({
+      type: "tool_execution_end",
+      toolCallId: "tool-1",
+      result: {},
+      isError: false,
+    });
+    expect(
+      events
+        .eventsSince({ eventTypes: ["tool.started", "tool.updated", "tool.completed"] })
+        .map((event) => event.type),
+    ).toEqual(["tool.started", "tool.updated", "tool.completed"]);
+    await pool.stopAll();
+  });
 });
 
 function fakeWorkerFactory(
-  version = "0.75.5",
+  version = "1.0.0",
 ): NonNullable<ConstructorParameters<typeof WorkerPool>[0]["workerFactory"]> {
   return ({ workerId, cwd }) => new FakeWorker(workerId, cwd, version);
 }
@@ -284,7 +417,7 @@ class FakeWorker {
   constructor(
     readonly workerId: string,
     readonly cwd: string,
-    version = "0.75.5",
+    version = "1.0.0",
   ) {
     this.version = version;
   }

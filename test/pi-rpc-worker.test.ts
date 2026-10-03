@@ -76,7 +76,7 @@ describe("PiRpcWorker", () => {
     delete process.env.PI_TELEMETRY;
     const { bin, envPath } = fakePiBin({ recordVersionEnv: true });
 
-    await expect(probePiVersion(bin)).resolves.toBe("0.75.5");
+    await expect(probePiVersion(bin)).resolves.toBe("1.0.0");
 
     expect(JSON.parse(readFileSync(envPath!, "utf8"))).toEqual({
       PI_OFFLINE: "1",
@@ -88,9 +88,74 @@ describe("PiRpcWorker", () => {
   it("uses a 15 second default pi version probe timeout", () => {
     expect(DEFAULT_PI_VERSION_TIMEOUT_MS).toBe(15_000);
   });
+
+  it("reports a missing executable without an unhandled process error", async () => {
+    const { root } = fakePiBin();
+    await expect(probePiVersion(join(root, "missing"))).rejects.toMatchObject({
+      code: "piRpcError",
+    });
+  });
+
+  it("reports version probe timeouts", async () => {
+    const { bin } = fakePiBin({ hangVersion: true });
+    await expect(probePiVersion(bin, 100)).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  it("rejects old Pi versions before starting a worker", async () => {
+    const { bin, root } = fakePiBin({ version: "0.82.1" });
+    const worker = new PiRpcWorker({ workerId: "worker_1", cwd: root, piBin: bin });
+    await expect(worker.start()).rejects.toMatchObject({
+      code: "piRpcError",
+      data: { supported: "1.0.x" },
+    });
+    expect(worker.pid).toBeUndefined();
+  });
+
+  it("reports a missing worker cwd as a startup error", async () => {
+    const { bin, root } = fakePiBin();
+    const worker = new PiRpcWorker({
+      workerId: "worker_1",
+      cwd: join(root, "missing"),
+      piBin: bin,
+    });
+    await expect(worker.start()).rejects.toMatchObject({ code: "piRpcError" });
+    await worker.stop();
+  });
+
+  it("rejects pending commands when a worker crashes", async () => {
+    const { bin, root } = fakePiBin();
+    const worker = new PiRpcWorker({ workerId: "worker_1", cwd: root, piBin: bin });
+    await worker.start();
+    try {
+      await expect(worker.command({ type: "crash" }, 2_000)).rejects.toMatchObject({
+        code: "workerCrashed",
+      });
+      expect(worker.state).toBe("crashed");
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("terminates workers after a command timeout instead of reusing ambiguous state", async () => {
+    const { bin, root } = fakePiBin();
+    const worker = new PiRpcWorker({ workerId: "worker_1", cwd: root, piBin: bin });
+    await worker.start();
+    try {
+      await expect(worker.command({ type: "hang" }, 100)).rejects.toMatchObject({
+        code: "timeout",
+      });
+      await expect(worker.command({ type: "fast" })).rejects.toMatchObject({
+        code: "workerCrashed",
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
 });
 
-function fakePiBin(options: { recordVersionEnv?: boolean } = {}): {
+function fakePiBin(
+  options: { recordVersionEnv?: boolean; version?: string; hangVersion?: boolean } = {},
+): {
   bin: string;
   envPath?: string;
   logPath: string;
@@ -115,10 +180,14 @@ if (process.argv.includes("--version")) {
       PI_TELEMETRY: process.env.PI_TELEMETRY,
     }));
   }
-  console.log("0.75.5");
-  process.exit(0);
+  if (${Boolean(options.hangVersion)}) {
+    setInterval(() => {}, 1000);
+  } else {
+    console.log(${JSON.stringify(options.version ?? "1.0.0")});
+    process.exit(0);
+  }
 }
-if (!process.argv.includes("--mode") || !process.argv.includes("rpc")) {
+if (!process.argv.includes("--version") && (!process.argv.includes("--mode") || !process.argv.includes("rpc"))) {
   process.exit(2);
 }
 function log(line) {
@@ -139,7 +208,11 @@ process.stdin.on("data", (chunk) => {
     if (!line) continue;
     const command = JSON.parse(line);
     log("start " + command.type);
-    if (command.type === "garbage_then_ok") {
+    if (command.type === "crash") {
+      process.exit(1);
+    } else if (command.type === "hang") {
+      continue;
+    } else if (command.type === "garbage_then_ok") {
       process.stdout.write("this is not json\\n");
       log("end " + command.type);
       send({ id: command.id, type: "response", command: command.type, success: true });

@@ -1,10 +1,23 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig, resolveClientConfig, resolveEndpoint } from "../src/config.ts";
 
 describe("config", () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function writeConfig(config: unknown): string {
+    const root = mkdtempSync(join(tmpdir(), "pi-threads-config-validation-"));
+    roots.push(root);
+    const path = join(root, "config.json");
+    writeFileSync(path, JSON.stringify(config));
+    return path;
+  }
   it("merges config files with defaults", () => {
     const dir = join(tmpdir(), `pi-threads-config-${Date.now()}`);
     mkdirSync(dir, { recursive: true });
@@ -58,5 +71,25 @@ describe("config", () => {
     writeFileSync(path, JSON.stringify({ defaults: { thinking: "max" } }));
 
     expect(loadConfig(path).defaults.thinking).toBe("max");
+  });
+
+  it.each([
+    ["maxWorkers", "4"],
+    ["maxWorkers", 1.5],
+    ["minWorkers", null],
+    ["minWorkers", 0.5],
+    ["idleTtlMs", "1000"],
+    ["idleTtlMs", -1],
+  ])("rejects invalid numeric worker config %s=%s", (key, value) => {
+    const path = writeConfig({ daemon: { worker: { [key]: value } } });
+    expect(() => loadConfig(path)).toThrow(`daemon.worker.${key}`);
+  });
+
+  it.each(["", null, 0])("rejects an invalid default thinking level %s", (thinking) => {
+    expect(() => loadConfig(writeConfig({ defaults: { thinking } }))).toThrow("defaults.thinking");
+  });
+
+  it.each(["", "   ", null, 42])("rejects an invalid default model %s", (model) => {
+    expect(() => loadConfig(writeConfig({ defaults: { model } }))).toThrow("defaults.model");
   });
 });

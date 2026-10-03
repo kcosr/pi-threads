@@ -14,7 +14,7 @@ writeFileSync(
   `#!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
-if (process.argv.includes("--version")) { console.log("0.75.5"); process.exit(0); }
+if (process.argv.includes("--version")) { console.log("1.0.0"); process.exit(0); }
 if (!process.argv.includes("--mode") || !process.argv.includes("rpc")) process.exit(2);
 let id = "mock-" + Math.random().toString(16).slice(2);
 let file = path.join(process.cwd(), ".fake-pi", id + ".jsonl");
@@ -37,7 +37,7 @@ process.stdin.on("data", chunk => {
     if (cmd.type === "new_session") { id = "mock-" + Math.random().toString(16).slice(2); file = path.join(process.cwd(), ".fake-pi", id + ".jsonl"); ensureSession(); send({id:cmd.id,type:"response",command:"new_session",success:true,data:{cancelled:false}}); }
     else if (cmd.type === "switch_session") { file = cmd.sessionPath; const header = JSON.parse(fs.readFileSync(file, "utf8").split("\\n")[0]); id = header.id; send({id:cmd.id,type:"response",command:"switch_session",success:true,data:{cancelled:false}}); }
     else if (cmd.type === "get_state") { ensureSession(); send({id:cmd.id,type:"response",command:"get_state",success:true,data:{sessionId:id,sessionFile:file,sessionName:name,thinkingLevel:"medium",isStreaming:false,isCompacting:false,steeringMode:"all",followUpMode:"one-at-a-time",autoCompactionEnabled:true,messageCount:0,pendingMessageCount:0}}); }
-    else if (cmd.type === "prompt") { ensureSession(); send({id:cmd.id,type:"response",command:"prompt",success:true}); send({type:"agent_start",id:"run"}); setTimeout(() => { fs.appendFileSync(file, JSON.stringify({type:"message",id:"m1",parentId:null,timestamp:new Date().toISOString(),message:{role:"user",content:cmd.message}})+"\\n"); send({type:"message_end",message:{role:"assistant",content:"ok",stopReason:"stop"}}); send({type:"agent_end",messages:[{role:"assistant",content:"ok",stopReason:"stop"}],willRetry:false}); }, 20); }
+    else if (cmd.type === "prompt") { ensureSession(); send({id:cmd.id,type:"response",command:"prompt",success:true,data:{disposition:"started"}}); send({type:"agent_start",id:"run"}); setTimeout(() => { fs.appendFileSync(file, JSON.stringify({type:"message",id:"m1",parentId:null,timestamp:new Date().toISOString(),message:{role:"user",content:cmd.message}})+"\\n"); send({type:"message_end",message:{role:"assistant",content:"ok",stopReason:"stop"}}); send({type:"agent_end",messages:[{role:"assistant",content:"ok",stopReason:"stop"}],willRetry:false}); send({type:"agent_settled"}); }, 20); }
     else if (cmd.type === "set_session_name") { ensureSession(); name = cmd.name; fs.appendFileSync(file, JSON.stringify({type:"session_info",id:"n1",parentId:null,timestamp:new Date().toISOString(),name})+"\\n"); send({id:cmd.id,type:"response",command:"set_session_name",success:true}); }
     else if (cmd.type === "get_messages") { send({id:cmd.id,type:"response",command:"get_messages",success:true,data:{messages:[{role:"user",content:"mock"}]}}); }
     else if (cmd.type === "get_available_models") { send({id:cmd.id,type:"response",command:"get_available_models",success:true,data:{models:[{provider:"mock",id:"mock-model"}]}}); }
@@ -114,7 +114,10 @@ try {
 }
 
 async function cli(args: string[]): Promise<string> {
-  const child = spawn(command, args, { env: { ...process.env, PI_THREADS_PI_BIN: bin } });
+  const child = spawn(command, args, {
+    env: { ...process.env, PI_THREADS_PI_BIN: bin },
+    timeout: 15_000,
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
