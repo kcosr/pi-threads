@@ -4,10 +4,17 @@
 
 ### Breaking Changes
 
+- Event subscriptions default to live-only delivery. Replay requires an opaque
+  daemon-instance-qualified `sinceEventId`; numeric cursors are removed. Expired
+  and prior-instance cursors fail explicitly with `eventHistoryLost`.
+
 - Require Pi 1.0.x (tested with 1.0.0); remove Pi 0.x worker compatibility.
   The pinned Pi dependency now requires Node.js 22.19 or newer.
 
 ### Added
+
+- Add bounded, transport-independent turn stream coordination with acceptance
+  ordering, exact-turn filtering, and deterministic observer cleanup.
 
 - Add `smoke:pi`, exercising the actual Pi 1.0 CLI against a local model
   fixture with isolated settings and sessions, without provider calls.
@@ -20,6 +27,8 @@
 - Update the pinned Pi protocol/runtime dependency to 1.0.0.
 
 ### Fixed
+
+- Deliver nested lifecycle events in cursor order and isolate failed observers.
 
 - Honor Pi 1.0 prompt, steer, and follow-up dispositions so extension-handled
   input does not leave turns waiting or incorrectly report queued work.

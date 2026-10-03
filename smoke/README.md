@@ -29,3 +29,9 @@ Current live smoke always runs real model turns and includes abort coverage. `RU
 Real live smoke may spend provider tokens. Use `smoke:mock` for fake-worker coverage or `smoke:pi` for no-cost real-Pi coverage.
 
 The live harness cleans up temporary config, socket, and work directories it creates. It does not intentionally operate on user project files unless the caller points it at an existing daemon or workdir.
+
+## Event and stream regressions
+
+`bun run check` includes cursor expiry/restart, nested event ordering, replay
+reentrancy, immediate turn completion, exact-turn filtering, observer cleanup,
+and bounded stream buffering tests. These tests do not invoke a model provider.

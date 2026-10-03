@@ -506,6 +506,13 @@ never use native Pi concurrently with a thread controlled by `pi-threads`.
 
 ## Transports And Security
 
+Event subscriptions are live-only unless `sinceEventId` is supplied. Event IDs
+are opaque daemon-instance-qualified cursors. Resuming an expired cursor or one
+from a previous daemon instance fails with `eventHistoryLost`; malformed/future
+cursors fail with `invalidParams`. Replay holds at most 1,000 events in memory.
+Events are delivered in publication order, including nested lifecycle events.
+
+
 - Unix socket JSON-RPC JSONL is the default local transport.
 - stdio JSON-RPC JSONL is available via `pi-threads daemon start --stdio`.
 - WebSocket JSON-RPC is opt-in through config.
