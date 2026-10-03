@@ -1,28 +1,50 @@
-import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CliRuntime } from "../src/cli/runtime.ts";
+import { printJson, printNdjson, renderEvent } from "../src/cli/render.ts";
 
 const state = vi.hoisted(() => ({
-  run: undefined as undefined | ((client: EventEmitter) => void),
+  terminal: "turn.completed",
+  interrupted: false,
+  request: vi.fn(),
+  streamTurn: vi.fn(),
+  close: vi.fn(),
+  streamClose: vi.fn(),
 }));
-
+const accepted = {
+  threadId: "thread-1",
+  turnId: "turn-1",
+  workerId: "worker-1",
+  status: "accepted",
+};
 vi.mock("../src/client/daemon-client.ts", () => ({
-  DaemonClient: class extends EventEmitter {
-    async connect() {}
-    async request(method: string) {
-      if (method === "subscribe/all") return { subscriptionId: "sub-1" };
-      state.run?.(this);
-      return { threadId: "thread-1", turnId: "turn-1", status: "accepted" };
+  DaemonClient: class {
+    async request() {
+      state.request();
+      return accepted;
     }
-    async close() {}
+    async streamTurn() {
+      state.streamTurn();
+      return {
+        close: state.streamClose,
+        async *[Symbol.asyncIterator]() {
+          yield { type: "accepted", result: accepted };
+          if (state.interrupted) throw new Error("connection lost");
+          yield {
+            type: "event",
+            event: { type: state.terminal, threadId: "thread-1", turnId: "turn-1", payload: {} },
+          };
+        },
+      };
+    }
+    async close() {
+      state.close();
+    }
   },
 }));
-
 vi.mock("../src/config.ts", () => ({
   loadConfig: () => ({}),
   resolveClientConfig: () => ({ endpoint: "unix:///unused" }),
 }));
-
 vi.mock("../src/cli/render.ts", () => ({
   printJson: vi.fn(),
   printNdjson: vi.fn(),
@@ -30,53 +52,59 @@ vi.mock("../src/cli/render.ts", () => ({
   renderEvent: vi.fn(),
   renderThreadRead: vi.fn(),
 }));
-
 afterEach(() => {
-  state.run = undefined;
+  state.terminal = "turn.completed";
+  state.interrupted = false;
+  vi.clearAllMocks();
 });
 
-function terminal(type: string, turnId = "turn-1") {
-  return { type, threadId: "thread-1", turnId, payload: { message: "provider failed" } };
-}
-
-describe("CLI turn waits", () => {
-  it("accepts a terminal event received before the request response", async () => {
-    state.run = (client) => client.emit("event", terminal("turn.completed"));
-    await expect(
-      new CliRuntime(() => ({})).work("thread/send", { prompt: "hello" }),
-    ).resolves.toBeUndefined();
+describe("CLI turn modes", () => {
+  it("waits by default, emitting only the acceptance JSON", async () => {
+    await new CliRuntime(() => ({ json: true })).work("thread/send", { prompt: "hello" });
+    expect(state.streamTurn).toHaveBeenCalledOnce();
+    expect(printJson).toHaveBeenCalledExactlyOnceWith(accepted);
+    expect(renderEvent).not.toHaveBeenCalled();
+    expect(state.streamClose).toHaveBeenCalledOnce();
+    expect(state.close).toHaveBeenCalledOnce();
   });
-
-  it("reports a failed turn to the caller", async () => {
-    state.run = (client) => client.emit("event", terminal("turn.failed"));
-    await expect(
-      new CliRuntime(() => ({})).work("thread/send", { prompt: "hello" }),
-    ).rejects.toThrow("provider failed");
+  it("renders streamed acceptance and events as NDJSON", async () => {
+    await new CliRuntime(() => ({ json: true, stream: true })).work("thread/send", {
+      prompt: "hello",
+    });
+    expect(printNdjson).toHaveBeenCalledExactlyOnceWith(accepted);
+    expect(renderEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "turn.completed" }),
+      true,
+    );
   });
-
-  it("reports an aborted turn to the caller", async () => {
-    state.run = (client) => client.emit("event", { ...terminal("turn.aborted"), payload: {} });
-    await expect(
-      new CliRuntime(() => ({})).work("thread/send", { prompt: "hello" }),
-    ).rejects.toThrow("Pi turn aborted");
+  it.each([
+    { wait: false },
+    { wait: false, stream: true, json: true },
+  ])("no-wait takes precedence: %j", async (options) => {
+    await new CliRuntime(() => options).work("thread/send", { prompt: "hello" });
+    expect(state.request).toHaveBeenCalledOnce();
+    expect(state.streamTurn).not.toHaveBeenCalled();
+    expect(renderEvent).not.toHaveBeenCalled();
   });
-
-  it("rejects a wait when the daemon disconnects", async () => {
-    state.run = (client) =>
-      queueMicrotask(() => client.emit("close", new Error("connection lost")));
-    await expect(
-      new CliRuntime(() => ({})).work("thread/send", { prompt: "hello" }),
-    ).rejects.toThrow("connection lost");
+  it("promptless new returns acceptance without a turn wait", async () => {
+    await new CliRuntime(() => ({ stream: true })).work("thread/start", {});
+    expect(state.request).toHaveBeenCalledOnce();
+    expect(state.streamTurn).not.toHaveBeenCalled();
   });
-
-  it("does not mistake another turn's completion for this turn", async () => {
-    state.run = (client) => {
-      client.emit("event", terminal("turn.completed", "old-turn"));
-      client.emit("event", { ...terminal("turn.completed"), turnId: undefined });
-      client.emit("event", terminal("turn.failed"));
-    };
+  it.each(["turn.failed", "turn.aborted"])("renders %s then reports failure", async (type) => {
+    state.terminal = type;
     await expect(
-      new CliRuntime(() => ({})).work("thread/send", { prompt: "hello" }),
-    ).rejects.toThrow("provider failed");
+      new CliRuntime(() => ({ stream: true })).work("thread/send", { prompt: "hi" }),
+    ).rejects.toThrow(type === "turn.failed" ? "Pi turn failed" : "Pi turn aborted");
+    expect(renderEvent).toHaveBeenCalledWith(expect.objectContaining({ type }), false);
+    expect(state.streamClose).toHaveBeenCalledOnce();
+    expect(state.close).toHaveBeenCalledOnce();
+  });
+  it("reports interrupted streams instead of succeeding", async () => {
+    state.interrupted = true;
+    await expect(new CliRuntime(() => ({})).work("thread/send", { prompt: "hi" })).rejects.toThrow(
+      "connection lost",
+    );
+    expect(state.close).toHaveBeenCalledOnce();
   });
 });

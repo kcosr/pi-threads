@@ -39,3 +39,21 @@ and bounded stream buffering tests. These tests do not invoke a model provider.
 HTTP transport tests cover RPC results/errors, streamed admission and execution,
 filtered replay, disconnect cleanup, authentication/CORS, request limits, stalled
 readers and shared HTTP/WebSocket shutdown. Run `bun run check` for these tests.
+
+## HTTP and TLS smoke
+
+Mock smoke now checks Unix, HTTP and WebSocket CLI requests and finite streamed
+turns against the same daemon. JSON streaming must include acceptance, message
+progress and terminal completion. It works with source or `PI_THREADS_SMOKE_BIN`.
+
+```bash
+bun run smoke:mock
+PI_THREADS_SMOKE_TLS=1 bun run smoke:mock
+PI_THREADS_SMOKE_TLS=1 PI_THREADS_SMOKE_BIN=./bin/pi-threads bun run smoke:mock
+```
+
+TLS smoke uses `openssl` to create an ephemeral self-signed certificate and tests
+HTTPS/WSS with explicit `--tls-ca` trust and bearer authentication. It uses no
+provider credentials. The ordinary test suite also needs `openssl` for TLS tests.
+`smoke:pi` additionally exercises streamed HTTP responses and extension-handled
+turns using the actual Pi runtime and the isolated local model fixture.

@@ -1,256 +1,116 @@
-import net from "node:net";
-import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
-import https from "node:https";
-import WebSocket from "ws";
-import { DaemonError, type ErrorCode } from "../errors.ts";
-import type { DaemonEvent } from "../protocol/events.ts";
-import { encodeJsonLine } from "../protocol/json-rpc.ts";
+import { DaemonError } from "../errors.ts";
+import type { DaemonEvent, EventFilter } from "../protocol/events.ts";
+import type { AcceptedTurn, ThreadReadResult } from "../protocol/types.ts";
+import { BufferedStream } from "../protocol/stream.ts";
+import { assertTurnMethod, createTurnStream, type TurnFrame } from "../protocol/turn-stream.ts";
+import { validateEventFilter } from "../service/event-bus.ts";
+import { HttpClient } from "./http-client.ts";
+import { SocketClient } from "./socket-client.ts";
+import type { DaemonClientOptions } from "./options.ts";
 
-export interface DaemonClientOptions {
-  endpoint: string;
-  authToken?: string;
-  authTokenEnv?: string;
-  tlsCa?: string;
-}
-
-export class DaemonClient extends EventEmitter {
-  private nextId = 1;
-  private transport: ClientTransport | undefined;
-  private connecting: Promise<void> | undefined;
+/** Requests and owned streams, independent of HTTP versus persistent socket framing. */
+export class DaemonClient {
   private closed = false;
-  private readonly pending = new Map<
-    string,
-    { resolve: (value: unknown) => void; reject: (error: unknown) => void }
-  >();
+  private readonly http: HttpClient | undefined;
+  private socket: SocketClient | undefined;
+  private readonly sockets = new Set<SocketClient>();
 
   constructor(private readonly options: DaemonClientOptions) {
-    super();
+    if (/^https?:\/\//.test(options.endpoint)) this.http = new HttpClient(options);
   }
 
-  async connect(): Promise<void> {
-    if (this.closed) {
-      throw new DaemonError("workerCrashed", "Daemon connection closed");
+  async request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    this.assertOpen();
+    if (method.startsWith("subscribe/") || method.startsWith("unsubscribe/")) {
+      throw new DaemonError("invalidParams", "Use subscribe() to own an event stream");
     }
-    if (this.transport) return;
-    this.connecting ??= this.openTransport();
+    if (this.http) return this.http.request<T>(method, params);
+    this.socket ??= this.openSocket();
+    return this.socket.request<T>(method, params);
+  }
+
+  async subscribe(filter: EventFilter = {}): Promise<BufferedStream<DaemonEvent>> {
+    this.assertOpen();
+    const checked = validateEventFilter(filter);
+    if (this.http) return this.http.subscribe(checked);
+    const socket = this.openSocket();
+    const stream = new BufferedStream<DaemonEvent>(() => this.release(socket));
+    const listener = (event: DaemonEvent) => stream.push(event);
+    socket.on("event", listener);
+    socket.on("close", (error) => stream.fail(error));
     try {
-      await this.connecting;
-    } finally {
-      this.connecting = undefined;
+      await socket.request("subscribe/all", checked as Record<string, unknown>);
+      return stream;
+    } catch (error) {
+      stream.fail(error);
+      throw error;
     }
   }
 
-  private async openTransport(): Promise<void> {
-    const transport = await connectTransport(this.options);
-    if (this.closed) {
-      transport.close();
-      throw new DaemonError("workerCrashed", "Daemon connection closed");
-    }
-    this.transport = transport;
-    transport.onMessage((line) => this.handleLine(line));
-    transport.onClose(() => this.handleClose());
-  }
-
-  async request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
-    await this.connect();
-    if (this.closed) throw new DaemonError("workerCrashed", "Daemon connection closed");
-    const id = String(this.nextId++);
-    const line = encodeJsonLine({
-      jsonrpc: "2.0",
-      id,
+  async streamTurn(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<BufferedStream<TurnFrame>> {
+    this.assertOpen();
+    assertTurnMethod(method);
+    if (this.http) return this.http.streamTurn(method, params);
+    let socket: SocketClient | undefined;
+    return createTurnStream(
+      {
+        resolveThreadId: async (input) => {
+          const result = await this.request<ThreadReadResult>("thread/read", {
+            threadId: input,
+            last: 0,
+          });
+          return result.thread.threadId;
+        },
+        request: (name, input) => socket!.request<AcceptedTurn>(name, input),
+        subscribe: async (filter, listener, onError, signal) => {
+          this.assertOpen();
+          const connection = this.openSocket();
+          socket = connection;
+          connection.on("event", listener);
+          connection.on("close", onError);
+          const dispose = () => {
+            signal.removeEventListener("abort", dispose);
+            connection.off("event", listener);
+            connection.off("close", onError);
+            this.release(connection);
+          };
+          signal.addEventListener("abort", dispose, { once: true });
+          try {
+            await connection.request("subscribe/all", filter as Record<string, unknown>);
+          } catch (error) {
+            dispose();
+            throw error;
+          }
+          return dispose;
+        },
+      },
       method,
-      params: params ?? {},
-    });
-    const result = new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      try {
-        this.transport!.send(line);
-      } catch (error) {
-        this.pending.delete(id);
-        reject(error);
-      }
-    });
-    return result;
+      params,
+    );
   }
 
   async close(): Promise<void> {
-    this.handleClose();
-    this.transport?.close();
-  }
-
-  private handleClose(): void {
     if (this.closed) return;
     this.closed = true;
-    const error = new DaemonError("workerCrashed", "Daemon connection closed");
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
-    this.emit("close", error);
+    await this.http?.close();
+    await Promise.all([...this.sockets].map((socket) => socket.close()));
+    this.sockets.clear();
   }
 
-  private handleLine(line: string): void {
-    const payload = safeParseDaemonLine(line);
-    if (!payload) {
-      return;
-    }
-    if (payload.method === "thread/event") {
-      this.emit("event", payload.params as DaemonEvent);
-      return;
-    }
-    const id = String(payload.id);
-    const pending = this.pending.get(id);
-    if (!pending) {
-      return;
-    }
-    this.pending.delete(id);
-    if (isRecord(payload.error)) {
-      pending.reject(
-        new DaemonError(
-          String(payload.error.code ?? "internal") as ErrorCode,
-          String(payload.error.message ?? "Daemon returned an error"),
-          isRecord(payload.error.data) ? payload.error.data : undefined,
-        ),
-      );
-    } else {
-      pending.resolve(payload.result);
-    }
+  private openSocket(): SocketClient {
+    this.assertOpen();
+    const socket = new SocketClient(this.options);
+    this.sockets.add(socket);
+    return socket;
   }
-}
-
-function safeParseDaemonLine(line: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(line);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    return undefined;
+  private release(socket: SocketClient): void {
+    this.sockets.delete(socket);
+    void socket.close();
   }
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-interface ClientTransport {
-  send(line: string): void;
-  close(): void;
-  onMessage(callback: (line: string) => void): void;
-  onClose(callback: () => void): void;
-}
-
-async function connectTransport(options: DaemonClientOptions): Promise<ClientTransport> {
-  if (options.endpoint.startsWith("unix://")) {
-    const socketPath = options.endpoint.slice("unix://".length);
-    return connectUnix(socketPath);
-  }
-  if (options.endpoint.startsWith("ws://") || options.endpoint.startsWith("wss://")) {
-    return connectWebSocket(options);
-  }
-  throw new DaemonError("invalidParams", "Unsupported endpoint", { endpoint: options.endpoint });
-}
-
-async function connectUnix(path: string): Promise<ClientTransport> {
-  const socket = net.createConnection(path);
-  await new Promise<void>((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
-  });
-  return new LineTransport(socket);
-}
-
-async function connectWebSocket(options: DaemonClientOptions): Promise<ClientTransport> {
-  const token =
-    options.authToken ?? (options.authTokenEnv ? process.env[options.authTokenEnv] : undefined);
-  const socket = new WebSocket(options.endpoint, {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    agent: options.tlsCa
-      ? new https.Agent({
-          ca: readFileSync(options.tlsCa),
-        })
-      : undefined,
-  });
-  await new Promise<void>((resolve, reject) => {
-    socket.once("open", resolve);
-    socket.once("error", reject);
-  });
-  return new WebSocketTransport(socket);
-}
-
-class LineTransport implements ClientTransport {
-  private buffer = "";
-  private messageCallback: ((line: string) => void) | undefined;
-  private closeCallback: (() => void) | undefined;
-
-  constructor(private readonly socket: net.Socket) {
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk: string) => this.consume(chunk));
-    socket.on("close", () => this.closeCallback?.());
-    socket.on("error", () => socket.destroy());
-  }
-
-  send(line: string): void {
-    this.socket.write(line);
-  }
-
-  close(): void {
-    this.socket.end();
-  }
-
-  onMessage(callback: (line: string) => void): void {
-    this.messageCallback = callback;
-  }
-
-  onClose(callback: () => void): void {
-    this.closeCallback = callback;
-  }
-
-  private consume(chunk: string): void {
-    this.buffer += chunk;
-    for (;;) {
-      const index = this.buffer.indexOf("\n");
-      if (index === -1) {
-        return;
-      }
-      const line = this.buffer.slice(0, index).replace(/\r$/, "");
-      this.buffer = this.buffer.slice(index + 1);
-      if (line) {
-        this.messageCallback?.(line);
-      }
-    }
-  }
-}
-
-class WebSocketTransport implements ClientTransport {
-  private messageCallback: ((line: string) => void) | undefined;
-  private closeCallback: (() => void) | undefined;
-
-  constructor(private readonly socket: WebSocket) {
-    socket.on("message", (data) => {
-      for (const line of data.toString().split("\n")) {
-        if (line) {
-          this.messageCallback?.(line);
-        }
-      }
-    });
-    socket.on("close", () => this.closeCallback?.());
-    socket.on("error", () => socket.terminate());
-  }
-
-  send(line: string): void {
-    this.socket.send(line);
-  }
-
-  close(): void {
-    this.socket.close();
-  }
-
-  onMessage(callback: (line: string) => void): void {
-    this.messageCallback = callback;
-  }
-
-  onClose(callback: () => void): void {
-    this.closeCallback = callback;
+  private assertOpen(): void {
+    if (this.closed) throw new DaemonError("streamInterrupted", "Daemon client closed");
   }
 }

@@ -13,6 +13,11 @@
 
 ### Added
 
+- Add HTTP(S) client endpoints, owned async event/turn streams, and CLI wait/stream
+  parity across Unix, WebSocket and HTTP. Private CA trust applies to HTTPS too.
+- Exercise source and compiled CLI transport parity and optional TLS in mock smoke;
+  exercise HTTP streaming against the real Pi local model fixture.
+
 - Serve HTTP RPC and SSE alongside WebSocket on the opt-in TCP listener, with
   finite streamed turns, filtered/resumable subscriptions, bearer authentication,
   browser Origin/CORS checks, bounded buffering, and shutdown cleanup.
@@ -28,9 +33,16 @@
 
 ### Changed
 
+- `--no-wait` takes precedence over `--stream`; promptless `new` returns acceptance
+  without opening an event subscription. Correct the documented blocking JSON
+  output to acceptance followed by a wait, without a final-text aggregate.
+
 - Update the pinned Pi protocol/runtime dependency to 1.0.0.
 
 ### Fixed
+
+- Closing a client or turn stream releases sockets even during connection or
+  subscription setup, including unfinished WebSocket handshakes under Bun.
 
 - Deliver nested lifecycle events in cursor order and isolate failed observers.
 

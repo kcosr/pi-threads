@@ -1,4 +1,3 @@
-import { isTerminalEventType } from "../protocol/events.ts";
 import { writeFileSync } from "node:fs";
 import { DaemonClient } from "../client/daemon-client.ts";
 import { loadConfig, resolveClientConfig } from "../config.ts";
@@ -49,70 +48,39 @@ export class CliRuntime {
   async work(method: string, params: Record<string, unknown>): Promise<void> {
     const options = this.readOptions();
     const client = this.client();
-    const noWait = options.wait === false;
-    const shouldWait = !noWait && hasPrompt(params);
-    const shouldSubscribe = options.stream || shouldWait;
-    const bufferedEvents: Array<Parameters<typeof renderEvent>[0]> = [];
-    let accepted: { threadId?: string; turnId?: string } | undefined;
-    let terminal: Parameters<typeof renderEvent>[0] | undefined;
-    let connectionError: Error | undefined;
-    let finishWaiting!: () => void;
-    const finished = new Promise<void>((resolve) => {
-      finishWaiting = resolve;
-    });
-    const handleClose = (error: Error) => {
-      connectionError = error;
-      finishWaiting();
-    };
-    client.on("close", handleClose);
-    const handleEvent = (event: Parameters<typeof renderEvent>[0]) => {
-      if (!accepted) {
-        bufferedEvents.push(event);
-        return;
-      }
-      if (!eventMatchesAccepted(event, accepted)) {
-        return;
-      }
-      if (options.stream) {
-        renderEvent(event, Boolean(options.json));
-      }
-      if (isTerminalEventType(event.type)) {
-        terminal = event;
-        finishWaiting();
-      }
+    const renderAcceptance = (value: unknown) => {
+      if (options.json && options.stream) printNdjson(value);
+      else this.render(value);
     };
     try {
-      if (shouldSubscribe) {
-        await client.connect();
-        client.on("event", handleEvent);
-        await client.request("subscribe/all", {});
-      }
-      accepted = (await client.request(method, params)) as { threadId?: string; turnId?: string };
-      if (options.json && options.stream) {
-        printNdjson(accepted);
-      } else {
-        this.render(accepted);
-      }
-      for (const event of bufferedEvents.splice(0)) {
-        handleEvent(event);
-      }
-      if (!shouldWait) {
+      if (options.wait === false || !hasPrompt(params)) {
+        renderAcceptance(await client.request(method, params));
         return;
       }
-      if (!terminal) await finished;
-      if (!terminal && connectionError) throw connectionError;
-      if (terminal?.type === "turn.failed" || terminal?.type === "turn.aborted") {
-        throw new DaemonError(
-          "piRpcError",
-          String(
-            terminal.payload.message ??
-              (terminal.type === "turn.aborted" ? "Pi turn aborted" : "Pi turn failed"),
-          ),
-          terminal.payload,
-        );
+      const stream = await client.streamTurn(method, params);
+      try {
+        for await (const frame of stream) {
+          if (frame.type === "accepted") {
+            renderAcceptance(frame.result);
+            continue;
+          }
+          const event = frame.event;
+          if (options.stream) renderEvent(event, Boolean(options.json));
+          if (event.type === "turn.failed" || event.type === "turn.aborted") {
+            throw new DaemonError(
+              "piRpcError",
+              String(
+                event.payload.message ??
+                  (event.type === "turn.aborted" ? "Pi turn aborted" : "Pi turn failed"),
+              ),
+              event.payload,
+            );
+          }
+        }
+      } finally {
+        await stream.close();
       }
     } finally {
-      client.off("close", handleClose);
       await client.close();
     }
   }
@@ -181,17 +149,4 @@ export class CliRuntime {
 
 function hasPrompt(params: Record<string, unknown>): boolean {
   return typeof params.prompt === "string" && params.prompt.trim().length > 0;
-}
-
-function eventMatchesAccepted(
-  event: Parameters<typeof renderEvent>[0],
-  accepted: { threadId?: string; turnId?: string },
-): boolean {
-  if (accepted.turnId) {
-    return event.turnId === accepted.turnId;
-  }
-  if (accepted.threadId && event.threadId) {
-    return event.threadId === accepted.threadId;
-  }
-  return false;
 }

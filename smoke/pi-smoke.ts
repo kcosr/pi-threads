@@ -1,3 +1,6 @@
+import { DaemonClient } from "../src/client/daemon-client.ts";
+import { startNetworkServer } from "../src/transport/http.ts";
+import type { RunningTransport } from "../src/transport/unix.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
@@ -96,11 +99,15 @@ process.env.PI_CODING_AGENT_SESSION_DIR = join(agentDir, "sessions");
 const config = defaultConfig();
 config.defaults = { model: "fixture/fixture", thinking: "off" };
 const service = new PiThreadsService(config);
+let network: RunningTransport | undefined;
+let httpClient: DaemonClient | undefined;
 const events: DaemonEvent[] = [];
 service.subscribe({}, (event) => events.push(event));
 
 try {
   await service.start();
+  network = await startNetworkServer({ bind: "127.0.0.1", port: 0, auth: {}, service });
+  httpClient = new DaemonClient({ endpoint: network.names[0]! });
   const blank = await service.threadStart({ cwd });
   assert.equal(
     ((await service.threadStatus({ threadId: blank.threadId })) as { status: string }).status,
@@ -127,6 +134,28 @@ try {
     prompt: "after settings",
   });
   assert.equal((await terminal(afterSettings.turnId)).type, "turn.completed");
+  const httpFrames = [];
+  for await (const frame of await httpClient.streamTurn("thread/send", {
+    threadId: blank.threadId,
+    prompt: "hello over HTTP",
+  }))
+    httpFrames.push(frame);
+  assert.equal(httpFrames[0]?.type, "accepted");
+  assert(
+    httpFrames.some((frame) => frame.type === "event" && frame.event.type === "message.delta"),
+  );
+  assert(JSON.stringify(httpFrames).includes("pi smoke response"));
+  const httpTerminal = httpFrames.at(-1);
+  assert(httpTerminal?.type === "event" && httpTerminal.event.type === "turn.completed");
+  const handledFrames = [];
+  for await (const frame of await httpClient.streamTurn("thread/send", {
+    threadId: blank.threadId,
+    prompt: "/smoke-handled",
+  }))
+    handledFrames.push(frame);
+  const handledTerminal = handledFrames.at(-1);
+  assert(handledTerminal?.type === "event" && handledTerminal.event.type === "turn.completed");
+
   const bash = await service.threadBashRun({ threadId: blank.threadId, command: "printf smoke" });
   assert.equal((bash.result as { output: string }).output, "smoke");
   const afterBash = await service.threadSend({ threadId: blank.threadId, prompt: "after bash" });
@@ -191,6 +220,8 @@ try {
   assert(service.workers.list().every((worker) => worker.version === "1.0.0"));
   console.log("Pi 1.0 smoke passed (real RPC, local model fixture, no provider calls)");
 } finally {
+  await httpClient?.close();
+  await network?.close();
   await service.shutdown();
   server.closeAllConnections();
   await new Promise<void>((done) => server.close(() => done()));

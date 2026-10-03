@@ -15,19 +15,19 @@ other storage outside the project design.
 | `daemon.worker.maxWorkers` | Enforced by `WorkerPool`; excess requests fail with `capacity`. |
 | `daemon.worker.minWorkers` | Prewarms and maintains a minimum total worker count. |
 | `daemon.worker.idleTtlMs` | Reaps idle or assigned non-running workers down to `minWorkers`. |
-| `daemon.tcp.enabled`, `bind`, `port` | Starts the optional WebSocket JSON-RPC listener. |
-| `daemon.tcp.authToken`, `authTokenEnv` | Enforced on WebSocket connections when configured. |
-| `daemon.tcp.allowedOrigins` | Enforced for WebSocket requests that include `Origin`. |
+| `daemon.tcp.enabled`, `bind`, `port` | Starts the shared optional HTTP/SSE and WebSocket listener. |
+| `daemon.tcp.authToken`, `authTokenEnv` | Enforced on HTTP requests and WebSocket connections when configured. |
+| `daemon.tcp.allowedOrigins` | Enforced for HTTP/WebSocket requests that include `Origin`; allowed HTTP origins receive CORS preflight support. |
 | `daemon.tcp.tls.cert`, `daemon.tcp.tls.key` | Used for HTTPS/WSS when both values are present; required for non-loopback binds. |
-| Non-loopback TCP bearer-token requirement | Non-loopback WebSocket startup requires a resolved bearer token as well as TLS. |
+| Non-loopback TCP bearer-token requirement | Non-loopback HTTP/WebSocket startup requires a resolved bearer token as well as TLS. |
 | `servers.*.endpoint` | Used by `--server ALIAS` to select the daemon endpoint. |
 | `servers.*.authToken`, `servers.*.authTokenEnv` | Inherited when `--server ALIAS` is used; explicit CLI token flags override alias config. |
-| `servers.*.tlsCa` | Inherited when `--server ALIAS` is used and passed to the WebSocket TLS client. |
+| `servers.*.tlsCa` | Inherited when `--server ALIAS` is used and passed to the HTTPS/WSS clients. |
 | `defaults.model` | Applied to new Pi sessions when `new` omits `--model`. Existing-thread sends inherit current thread settings unless `--model` is explicit. |
 | `defaults.thinking` | Applied to new Pi sessions when `new` omits `--thinking`; validated against Pi thinking levels. Existing-thread sends inherit current thread settings unless `--thinking` is explicit. |
 | `--config`, `--connect`, `--server`, `--json`, `--stream`, `--no-wait` | Implemented for CLI requests and work-starting commands. |
-| `--auth-token`, `--auth-token-env` | Passed to the WebSocket client as bearer auth. |
-| `--tls-ca` | Passed to the WebSocket TLS client as a private CA path. |
+| `--auth-token`, `--auth-token-env` | Passed to the HTTP/WebSocket clients as bearer auth. |
+| `--tls-ca` | Passed to the HTTPS/WSS clients as a private CA path. |
 | `new/send/settings set --model` | Implemented as `provider/modelId` or configured Pi model id/name lookup. |
 | `new/send/settings set --thinking` | Validated by CLI and sent as Pi `set_thinking_level`. |
 | `list/search` read filters | `--since`, `--sort`, `--asc`, `--desc`, `--cursor`, `--limit`, and `--cwd` are implemented. |

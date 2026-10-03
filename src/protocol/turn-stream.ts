@@ -14,6 +14,7 @@ export interface TurnSource {
     filter: EventFilter,
     listener: (event: DaemonEvent) => void,
     onError: (error: unknown) => void,
+    signal: AbortSignal,
   ): (() => void) | Promise<() => void>;
 }
 
@@ -42,8 +43,10 @@ export function createTurnStream(
   let accepted: AcceptedTurn | undefined;
   let pending: DaemonEvent[] = [];
   let pendingBytes = 0;
+  const controller = new AbortController();
   const stream = new BufferedStream<TurnFrame>(() => {
     pending = [];
+    controller.abort();
     dispose?.();
   }, limit);
   const deliver = (event: DaemonEvent) => {
@@ -72,7 +75,12 @@ export function createTurnStream(
       input = { ...params, threadId: filter.threadId };
     }
     if (stream.closed) return;
-    dispose = await source.subscribe(filter, deliver, (error) => stream.fail(error));
+    dispose = await source.subscribe(
+      filter,
+      deliver,
+      (error) => stream.fail(error),
+      controller.signal,
+    );
     if (stream.closed) {
       dispose();
       return;
