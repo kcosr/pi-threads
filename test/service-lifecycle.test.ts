@@ -329,9 +329,19 @@ describe("PiThreadsService Pi 1.0 lifecycle", () => {
 
 function fixture() {
   const worker = new FakeWorker();
+  let initialWorker = true;
   const events = new EventBus();
   const workers = new WorkerPool(
-    { minWorkers: 0, maxWorkers: 1, idleTtlMs: 300_000, workerFactory: () => worker },
+    {
+      minWorkers: 0,
+      maxWorkers: 1,
+      idleTtlMs: 300_000,
+      workerFactory: () => {
+        if (!initialWorker) return new FakeWorker();
+        initialWorker = false;
+        return worker;
+      },
+    },
     events,
   );
   const service = new PiThreadsService(defaultConfig(), {
@@ -343,6 +353,7 @@ function fixture() {
         cwd: worker.cwd,
       }),
       assertUnchanged: () => undefined,
+      isPersisted: () => true,
       updateFromWorkerState: () => undefined,
     } as unknown as PiSessionCatalog,
   });

@@ -13,7 +13,7 @@ import type {
   ThreadSummary,
 } from "../protocol/types.ts";
 import { PI_COMPATIBILITY, VERSION } from "../version.ts";
-import { PiSessionCatalog } from "../session/catalog.ts";
+import { PiSessionCatalog, type SessionInfo } from "../session/catalog.ts";
 import { WorkerPool, type PooledWorker } from "../worker/worker-pool.ts";
 import { promptDisposition, queueDisposition } from "../worker/input-disposition.ts";
 import { EventBus, type EventListener } from "./event-bus.ts";
@@ -37,6 +37,7 @@ export class PiThreadsService {
   readonly catalog: PiSessionCatalog;
   readonly workers: WorkerPool;
   private readonly defaults: PiThreadsConfig["defaults"];
+  private readonly reuseAcrossThreads: boolean;
   private readonly startedAt = Date.now();
   private readonly activeTurns = new Map<
     string,
@@ -52,6 +53,7 @@ export class PiThreadsService {
     options?: { catalog?: PiSessionCatalog; workers?: WorkerPool },
   ) {
     this.defaults = config.defaults;
+    this.reuseAcrossThreads = config.daemon.worker.reuseAcrossThreads;
     this.catalog = options?.catalog ?? new PiSessionCatalog();
     this.workers =
       options?.workers ??
@@ -60,6 +62,8 @@ export class PiThreadsService {
           minWorkers: config.daemon.worker.minWorkers,
           maxWorkers: config.daemon.worker.maxWorkers,
           idleTtlMs: config.daemon.worker.idleTtlMs,
+          reuseAcrossThreads: config.daemon.worker.reuseAcrossThreads,
+          canReclaim: (worker) => !worker.threadId || this.catalog.isPersisted(worker.threadId),
         },
         this.events,
       );
@@ -161,13 +165,18 @@ export class PiThreadsService {
   async threadMessages(params: { threadId: string; last?: number; role?: string; since?: string }) {
     const worker = this.workers.findByThread(params.threadId);
     if (worker) {
-      const response = await worker.command({ type: "get_messages" }, 20_000);
-      const messages = ((response.data as { messages?: unknown[] } | undefined)?.messages ??
-        []) as unknown[];
-      return {
-        threadId: params.threadId,
-        messages: filterMessages(messages, params),
-      };
+      this.workers.retain(worker);
+      try {
+        const response = await worker.command({ type: "get_messages" }, 20_000);
+        const messages = ((response.data as { messages?: unknown[] } | undefined)?.messages ??
+          []) as unknown[];
+        return {
+          threadId: params.threadId,
+          messages: filterMessages(messages, params),
+        };
+      } finally {
+        this.workers.release(worker);
+      }
     }
     const result = await this.catalog.messages(params.threadId);
     return {
@@ -225,9 +234,7 @@ export class PiThreadsService {
       return { threadId, turnId, workerId: worker.workerId, status: "accepted" };
     } catch (error) {
       worker.activeTurnId = undefined;
-      if (!worker.threadId) {
-        this.workers.release(worker);
-      }
+      this.workers.release(worker);
       throw error;
     }
   }
@@ -242,10 +249,12 @@ export class PiThreadsService {
     const session = await this.catalog.resolveThread(params.threadId);
     await this.turnCleanups.get(session.id);
     this.catalog.assertUnchanged(session.id);
+    this.assertResumable(session.id);
     const turnId = newTurnId();
     this.reserveTurn(session.id, turnId);
+    let worker: PooledWorker | undefined;
     try {
-      const worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
+      worker = await this.acquireSessionWorker(session);
       await this.applySettings(worker, params);
       worker.activeTurnId = turnId;
       worker.threadId = session.id;
@@ -262,6 +271,7 @@ export class PiThreadsService {
       return { threadId: session.id, turnId, workerId: worker.workerId, status: "accepted" };
     } catch (error) {
       this.activeTurns.delete(session.id);
+      if (worker) this.workers.release(worker);
       throw error;
     }
   }
@@ -327,16 +337,22 @@ export class PiThreadsService {
       const session = await this.catalog.resolveThread(params.threadId);
       return { threadId: session.id, status: "idle", path: session.path, cwd: session.cwd };
     }
-    const state = await worker.getState();
-    return {
-      threadId: params.threadId,
-      status: worker.state === "running" || state.isStreaming ? "running" : "idle",
-      workerId: worker.workerId,
-      state,
-    };
+    this.workers.retain(worker);
+    try {
+      const state = await worker.getState();
+      return {
+        threadId: params.threadId,
+        status: worker.state === "running" || state.isStreaming ? "running" : "idle",
+        workerId: worker.workerId,
+        state,
+      };
+    } finally {
+      this.workers.release(worker);
+    }
   }
 
   async threadFork(params: { threadId: string; entryId: string; name?: string }) {
+    this.requireCrossThreadReuse("fork");
     return this.withSessionMutation(params.threadId, async (worker, sourceThreadId) => {
       const response = await worker.command({ type: "fork", entryId: params.entryId }, 60_000);
       assertNotCancelled(response, "fork");
@@ -350,6 +366,7 @@ export class PiThreadsService {
   }
 
   async threadClone(params: { threadId: string; name?: string }) {
+    this.requireCrossThreadReuse("clone");
     return this.withSessionMutation(params.threadId, async (worker, sourceThreadId) => {
       assertNotCancelled(await worker.command({ type: "clone" }, 60_000), "clone");
       if (params.name) {
@@ -369,9 +386,10 @@ export class PiThreadsService {
   }
 
   async threadSettingsRead(params: { threadId: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    const state = await worker.getState();
-    return { threadId: params.threadId, settings: state };
+    return this.withRequiredWorker(params.threadId, async (worker) => {
+      const state = await worker.getState();
+      return { threadId: params.threadId, settings: state };
+    });
   }
 
   async threadSettingsUpdate(params: {
@@ -415,16 +433,17 @@ export class PiThreadsService {
   }
 
   async threadExportHtml(params: { threadId: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    const temp = mkdtempSync(join(tmpdir(), "pi-threads-export-"));
-    const outputPath = join(temp, "session.html");
-    try {
-      const response = await worker.command({ type: "export_html", outputPath }, 60_000);
-      const path = String((response.data as { path?: string } | undefined)?.path ?? outputPath);
-      return { threadId: params.threadId, html: readFileSync(path, "utf8") };
-    } finally {
-      rmSync(temp, { recursive: true, force: true });
-    }
+    return this.withRequiredWorker(params.threadId, async (worker) => {
+      const temp = mkdtempSync(join(tmpdir(), "pi-threads-export-"));
+      const outputPath = join(temp, "session.html");
+      try {
+        const response = await worker.command({ type: "export_html", outputPath }, 60_000);
+        const path = String((response.data as { path?: string } | undefined)?.path ?? outputPath);
+        return { threadId: params.threadId, html: readFileSync(path, "utf8") };
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    });
   }
 
   async threadBashRun(params: { threadId: string; command: string }) {
@@ -435,21 +454,24 @@ export class PiThreadsService {
   }
 
   async threadBashAbort(params: { threadId: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    await worker.command({ type: "abort_bash" }, 20_000);
-    return { threadId: params.threadId, status: "aborted" };
+    return this.withRequiredWorker(params.threadId, async (worker) => {
+      await worker.command({ type: "abort_bash" }, 20_000);
+      return { threadId: params.threadId, status: "aborted" };
+    });
   }
 
   async threadCommandsList(params: { threadId: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    const response = await worker.command({ type: "get_commands" }, 20_000);
-    return { threadId: params.threadId, ...(response.data as Record<string, unknown>) };
+    return this.withRequiredWorker(params.threadId, async (worker) => {
+      const response = await worker.command({ type: "get_commands" }, 20_000);
+      return { threadId: params.threadId, ...(response.data as Record<string, unknown>) };
+    });
   }
 
   async threadContextStats(params: { threadId: string }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    const response = await worker.command({ type: "get_session_stats" }, 20_000);
-    return { threadId: params.threadId, stats: response.data };
+    return this.withRequiredWorker(params.threadId, async (worker) => {
+      const response = await worker.command({ type: "get_session_stats" }, 20_000);
+      return { threadId: params.threadId, stats: response.data };
+    });
   }
 
   async threadExtensionUiRespond(params: {
@@ -457,20 +479,21 @@ export class PiThreadsService {
     requestId: string;
     response: unknown;
   }) {
-    const worker = await this.workerForRequiredMethod(params.threadId);
-    const response = isRecord(params.response) ? params.response : { value: params.response };
-    worker.sendRaw({
-      ...response,
-      id: params.requestId,
-      type: "extension_ui_response",
+    return this.withRequiredWorker(params.threadId, async (worker) => {
+      const response = isRecord(params.response) ? params.response : { value: params.response };
+      worker.sendRaw({
+        ...response,
+        id: params.requestId,
+        type: "extension_ui_response",
+      });
+      this.events.emit({
+        type: "extension_ui.completed",
+        threadId: params.threadId,
+        workerId: worker.workerId,
+        payload: { requestId: params.requestId, status: "responded" },
+      });
+      return { threadId: params.threadId, requestId: params.requestId, status: "responded" };
     });
-    this.events.emit({
-      type: "extension_ui.completed",
-      threadId: params.threadId,
-      workerId: worker.workerId,
-      payload: { requestId: params.requestId, status: "responded" },
-    });
-    return { threadId: params.threadId, requestId: params.requestId, status: "responded" };
   }
 
   async modelsList(params: { provider?: string } = {}) {
@@ -591,11 +614,60 @@ export class PiThreadsService {
     await this.turnCleanups.get(threadId);
     const assigned = this.workers.findByThread(threadId);
     if (assigned) {
+      this.workers.retain(assigned);
       return assigned;
     }
     const session = await this.catalog.resolveThread(threadId);
     await this.turnCleanups.get(session.id);
+    this.assertResumable(session.id);
     return this.workers.acquireForSession(session.id, session.cwd, session.path);
+  }
+
+  private assertResumable(threadId: string): void {
+    if (!this.workers.findByThread(threadId) && !this.catalog.isPersisted(threadId)) {
+      throw new DaemonError(
+        "notFound",
+        "Thread has no saved session and its worker is unavailable",
+        { threadId },
+      );
+    }
+  }
+
+  private async acquireSessionWorker(session: SessionInfo): Promise<PooledWorker> {
+    const worker = this.workers.findByThread(session.id);
+    if (worker?.cwd === session.cwd) {
+      if (worker.activeTurnId || worker.state === "running") {
+        throw new DaemonError("busy", "Thread already has active daemon work", {
+          threadId: session.id,
+        });
+      }
+      // The caller owns the canonical thread's turn/mutation reservation.
+      // Existing reads may finish through the RPC queue without blocking admission.
+      this.workers.retain(worker);
+      return worker;
+    }
+    return this.workers.acquireForSession(session.id, session.cwd, session.path);
+  }
+
+  private async withRequiredWorker<T>(
+    threadId: string,
+    operation: (worker: PooledWorker) => Promise<T>,
+  ): Promise<T> {
+    const worker = await this.workerForRequiredMethod(threadId);
+    try {
+      return await operation(worker);
+    } finally {
+      this.workers.release(worker);
+    }
+  }
+
+  private requireCrossThreadReuse(operation: string): void {
+    if (!this.reuseAcrossThreads) {
+      throw new DaemonError(
+        "invalidParams",
+        `${operation} requires daemon.worker.reuseAcrossThreads=true because Pi changes the worker's session in place`,
+      );
+    }
   }
 
   private async withSessionMutation<T>(
@@ -611,10 +683,11 @@ export class PiThreadsService {
       });
     }
     this.catalog.assertUnchanged(session.id);
+    this.assertResumable(session.id);
     this.sessionMutations.add(session.id);
     let worker: PooledWorker | undefined;
     try {
-      worker = await this.workers.acquireForSession(session.id, session.cwd, session.path);
+      worker = await this.acquireSessionWorker(session);
       worker.state = "running";
       return await mutate(worker, session.id);
     } finally {
@@ -807,8 +880,9 @@ export class PiThreadsService {
     ) {
       cleanup = this.refreshOwnedSession(event.threadId);
     } else {
-      this.workers.release(worker, event.threadId);
-      cleanup = this.refreshWorkerSession(worker, event.threadId);
+      cleanup = this.refreshWorkerSession(worker, event.threadId).finally(() => {
+        this.workers.release(worker, event.threadId);
+      });
     }
     this.turnCleanups.set(event.threadId, cleanup);
     try {

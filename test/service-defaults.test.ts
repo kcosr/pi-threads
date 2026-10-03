@@ -125,6 +125,7 @@ function serviceWithWorker(
       workers: {
         acquireForNew: async () => worker,
         acquireForSession: async () => worker,
+        retain: () => undefined,
         release: () => undefined,
         findByThread: () => worker,
         read: () => worker,

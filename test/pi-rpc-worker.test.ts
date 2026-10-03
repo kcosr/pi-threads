@@ -44,6 +44,25 @@ describe("PiRpcWorker", () => {
     ]);
   });
 
+  it("counts queued and in-flight commands until each completes", async () => {
+    const { bin, root } = fakePiBin();
+    const worker = new PiRpcWorker({ workerId: "worker_1", cwd: root, piBin: bin });
+    await worker.start();
+    try {
+      const slow = worker.command({ type: "slow" }, 2_000);
+      const queued = worker.command({ type: "slow" }, 2_000);
+      expect(worker.pendingCommandCount).toBe(2);
+      await slow;
+      expect(worker.pendingCommandCount).toBe(1);
+      await queued;
+      expect(worker.pendingCommandCount).toBe(0);
+      await expect(worker.command({ type: "hang" }, 50)).rejects.toMatchObject({ code: "timeout" });
+      expect(worker.pendingCommandCount).toBe(0);
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it("rejects malformed commands before writing to Pi RPC stdin", async () => {
     const { bin, root } = fakePiBin();
     const worker = new PiRpcWorker({ workerId: "worker_1", cwd: root, piBin: bin });

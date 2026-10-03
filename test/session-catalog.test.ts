@@ -146,10 +146,13 @@ describe("PiSessionCatalog", () => {
     });
     expect(await catalog.resolveThread(header.id)).toMatchObject({ name: "pending", path });
     expect(await catalog.messages(header.id)).toMatchObject({ messages: [] });
+    expect(catalog.isPersisted(header.id)).toBe(false);
 
     writeFileSync(path, `${JSON.stringify(header)}\n`);
+    expect(catalog.isPersisted(header.id)).toBe(true);
     expect((await catalog.resolveThread(header.id)).name).toBeUndefined();
     rmSync(path);
+    expect(catalog.isPersisted(header.id)).toBe(false);
     await expect(catalog.resolveThread(header.id)).rejects.toMatchObject({ code: "notFound" });
   });
 

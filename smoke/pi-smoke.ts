@@ -98,6 +98,8 @@ process.env.PI_TELEMETRY = "0";
 process.env.PI_CODING_AGENT_SESSION_DIR = join(agentDir, "sessions");
 const config = defaultConfig();
 config.defaults = { model: "fixture/fixture", thinking: "off" };
+config.daemon.worker.maxWorkers = 1;
+config.daemon.worker.reuseAcrossThreads = false;
 const service = new PiThreadsService(config);
 let network: RunningTransport | undefined;
 let httpClient: DaemonClient | undefined;
@@ -108,7 +110,7 @@ try {
   await service.start();
   network = await startNetworkServer({ bind: "127.0.0.1", port: 0, auth: {}, service });
   httpClient = new DaemonClient({ endpoint: network.names[0]! });
-  const blank = await service.threadStart({ cwd });
+  const blank = await service.threadStart({ cwd, name: "retained blank" });
   assert.equal(
     ((await service.threadStatus({ threadId: blank.threadId })) as { status: string }).status,
     "idle",
@@ -116,6 +118,12 @@ try {
   const handled = await service.threadSend({ threadId: blank.threadId, prompt: "/smoke-handled" });
   assert.equal((await terminal(handled.turnId)).type, "turn.completed");
   assert.equal(requestCount, 0, "handled prompts must not call a model");
+  await service.threadSettingsRead({ threadId: blank.threadId });
+  assert.equal(service.catalog.isPersisted(blank.threadId), false);
+  await assert.rejects(service.threadStart({ cwd }), { code: "capacity" });
+  const retained = await service.threadSettingsRead({ threadId: blank.threadId });
+  assert.equal(retained.settings.sessionId, blank.threadId);
+  assert.equal(retained.settings.sessionName, "retained blank");
 
   const sent = await service.threadSend({ threadId: blank.threadId, prompt: "hello" });
   assert.equal((await terminal(sent.turnId)).type, "turn.completed");
@@ -184,6 +192,7 @@ try {
   });
   const slow = await service.threadSend({ threadId: blank.threadId, prompt: "smoke-slow" });
   await withTimeout(slowStarted, "local slow request");
+  await assert.rejects(service.threadStart({ cwd }), { code: "capacity" });
   const consumed = await service.threadFollowUp({
     threadId: blank.threadId,
     prompt: "smoke-consumed",
@@ -218,7 +227,55 @@ try {
     "idle",
   );
   assert(service.workers.list().every((worker) => worker.version === "1.0.0"));
-  console.log("Pi 1.0 smoke passed (real RPC, local model fixture, no provider calls)");
+
+  // One-slot pressure must replace idle processes, preserve transcripts, and
+  // launch resumed threads in their original directory.
+  await service.threadSettingsRead({ threadId: blank.threadId });
+  const secondCwd = join(root, "second-work");
+  mkdirSync(secondCwd);
+  const second = await service.threadStart({ cwd: secondCwd, prompt: "second workspace" });
+  assert.notEqual(second.workerId, recovered.workerId);
+  assert.equal((await terminal(second.turnId)).type, "turn.completed");
+  await service.threadSettingsRead({ threadId: second.threadId });
+  assert.equal(service.workers.list().length, 1);
+  assert.equal(service.workers.list()[0]!.cwd, secondCwd);
+  const resumed = await service.threadSend({ threadId: blank.threadId, prompt: "after eviction" });
+  assert.notEqual(resumed.workerId, recovered.workerId);
+  assert.notEqual(resumed.workerId, second.workerId);
+  assert.equal((await terminal(resumed.turnId)).type, "turn.completed");
+  await service.threadSettingsRead({ threadId: blank.threadId });
+  assert.equal(service.workers.list()[0]!.cwd, cwd);
+  const resumedBash = await service.threadBashRun({ threadId: blank.threadId, command: "pwd" });
+  assert.equal((resumedBash.result as { output: string }).output.trim(), cwd);
+  assert(
+    JSON.stringify(await service.threadMessages({ threadId: blank.threadId })).includes(
+      "after crash",
+    ),
+  );
+  const sameThread = await service.threadSend({ threadId: blank.threadId, prompt: "same worker" });
+  assert.equal(sameThread.workerId, resumed.workerId);
+  assert.equal((await terminal(sameThread.turnId)).type, "turn.completed");
+
+  // Default cross-thread reuse must protect an unsaved session too.
+  const reuseConfig = defaultConfig();
+  reuseConfig.defaults = config.defaults;
+  reuseConfig.daemon.worker.maxWorkers = 1;
+  const reuseService = new PiThreadsService(reuseConfig);
+  try {
+    await reuseService.start();
+    const unsaved = await reuseService.threadStart({ cwd, name: "unsaved reuse" });
+    await reuseService.threadSettingsRead({ threadId: unsaved.threadId });
+    assert.equal(reuseService.catalog.isPersisted(unsaved.threadId), false);
+    await assert.rejects(reuseService.threadStart({ cwd }), { code: "capacity" });
+    const state = await reuseService.threadSettingsRead({ threadId: unsaved.threadId });
+    assert.equal(state.settings.sessionId, unsaved.threadId);
+    assert.equal(state.settings.sessionName, "unsaved reuse");
+  } finally {
+    await reuseService.shutdown();
+  }
+  console.log(
+    "Pi 1.0 smoke passed (real RPC, eviction/resume, local model fixture, no provider calls)",
+  );
 } finally {
   await httpClient?.close();
   await network?.close();

@@ -49,6 +49,11 @@ export class PiRpcWorker extends EventEmitter {
     }
   >();
   private commandQueue: Promise<void> = Promise.resolve();
+  private commandCount = 0;
+
+  get pendingCommandCount(): number {
+    return this.commandCount;
+  }
 
   constructor(private readonly options: PiRpcWorkerOptions) {
     super();
@@ -114,10 +119,16 @@ export class PiRpcWorker extends EventEmitter {
 
   async command(command: Record<string, unknown>, timeoutMs = 60_000): Promise<PiRpcResponse> {
     validateCommand(command);
-    if (isBypassCommand(command.type)) {
-      return this.executeCommand(command, timeoutMs);
+    this.commandCount += 1;
+    try {
+      if (isBypassCommand(command.type)) {
+        return await this.executeCommand(command, timeoutMs);
+      }
+      return await this.enqueueCommand(() => this.executeCommand(command, timeoutMs));
+    } finally {
+      this.commandCount -= 1;
+      this.lastUsedAt = new Date();
     }
-    return this.enqueueCommand(() => this.executeCommand(command, timeoutMs));
   }
 
   sendRaw(value: unknown): void {

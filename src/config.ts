@@ -13,6 +13,7 @@ export interface PiThreadsConfig {
       minWorkers: number;
       maxWorkers: number;
       idleTtlMs: number;
+      reuseAcrossThreads: boolean;
     };
     tcp: {
       enabled: boolean;
@@ -52,6 +53,7 @@ export function defaultConfig(): PiThreadsConfig {
         minWorkers: 0,
         maxWorkers: 4,
         idleTtlMs: 300_000,
+        reuseAcrossThreads: true,
       },
       tcp: {
         enabled: false,
@@ -153,6 +155,9 @@ function validateConfig(config: PiThreadsConfig, source: string): PiThreadsConfi
   }
   if (!Number.isSafeInteger(config.daemon.worker.idleTtlMs) || config.daemon.worker.idleTtlMs < 0) {
     throw new Error(`${source}: daemon.worker.idleTtlMs must be a non-negative integer`);
+  }
+  if (typeof config.daemon.worker.reuseAcrossThreads !== "boolean") {
+    throw new Error(`${source}: daemon.worker.reuseAcrossThreads must be a boolean`);
   }
   if (
     config.defaults.model !== undefined &&
