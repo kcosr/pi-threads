@@ -8,7 +8,7 @@ export const PI_COMPATIBILITY = {
   testedRange: "1.0.x",
   minimum: "1.0.0",
   maximumExclusive: "1.1.0",
-  tested: ["1.0.0"],
+  tested: ["1.0.2"],
 } as const;
 
 export function isSupportedPiVersion(version: string): boolean {

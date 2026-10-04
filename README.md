@@ -79,7 +79,7 @@ install -m 755 pi-threads-<version>-linux-x86_64/pi-threads ~/.local/bin/pi-thre
 pi-threads --help
 ```
 
-`pi-threads` requires the Pi 1.0.x CLI/runtime separately (tested with 1.0.0).
+`pi-threads` requires the Pi 1.0.x CLI/runtime separately (tested with 1.0.2).
 Pi 0.x, prereleases, and Pi 1.1 or later are rejected. The npm Pi CLI requires
 Node.js 22.19 or newer. Ensure the `pi` executable
 is on `PATH`, or set `PI_THREADS_PI_BIN=/path/to/pi` for daemon and smoke
@@ -666,7 +666,7 @@ Mock smoke is deterministic and non-costing:
 bun run smoke:mock
 ```
 
-The Pi integration smoke runs the pinned Pi 1.0.0 executable with disposable
+The Pi integration smoke runs the pinned Pi 1.0.2 executable with disposable
 settings and a local model fixture. It exercises real RPC, handled prompts,
 completion, settings changes, shell output, compaction, abort, failure, and
 worker crash recovery without provider calls:
@@ -777,7 +777,7 @@ pi-threads-VERSION-PLATFORM/
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| Next release | 1.0.x (tested: 1.0.0) | Current supported range |
+| Next release | 1.0.x (tested: 1.0.2) | Current supported range |
 
 Pi 1.0 runs complete on `agent_settled`; intermediate `agent_end` events retain
 the active turn through retries and queued work. An extension-handled prompt

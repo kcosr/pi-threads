@@ -96,8 +96,9 @@ Recommended scripts:
   "build:exe:macos-arm64": "node scripts/build-bun.mjs --target bun-darwin-arm64 --outfile bin/release/pi-threads-macos-arm64",
   "build:exe:macos-x86_64": "node scripts/build-bun.mjs --target bun-darwin-x64 --outfile bin/release/pi-threads-macos-x86_64",
   "smoke:mock": "bun run smoke/mock-smoke.ts",
+  "smoke:pi": "bun run smoke/pi-smoke.ts",
   "smoke:live": "bash smoke/live-smoke.sh",
-  "verify": "bun run check && bun run smoke:mock && bun run build && bun run build:exe && PI_THREADS_SMOKE_BIN=./bin/pi-threads bun run smoke:mock",
+  "verify": "bun run check && bun run smoke:mock && bun run smoke:pi && bun run build && bun run build:exe && PI_THREADS_SMOKE_BIN=./bin/pi-threads bun run smoke:mock",
   "package:release": "node scripts/package-release.mjs",
   "release": "node scripts/release.mjs"
 }
@@ -816,7 +817,7 @@ Current compatibility target:
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| Next release | 1.0.x (tested: 1.0.0) | Current supported range |
+| Next release | 1.0.x (tested: 1.0.2) | Current supported range |
 
 Worker assignment refuses unsupported `pi --version` values.
 

@@ -226,7 +226,7 @@ try {
     ((await service.threadStatus({ threadId: blank.threadId })) as { status: string }).status,
     "idle",
   );
-  assert(service.workers.list().every((worker) => worker.version === "1.0.0"));
+  assert(service.workers.list().every((worker) => worker.version === "1.0.2"));
 
   // One-slot pressure must replace idle processes, preserve transcripts, and
   // launch resumed threads in their original directory.

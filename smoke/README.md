@@ -2,7 +2,7 @@
 
 `smoke:mock` is deterministic and uses a generated fake Pi 1.0 executable that emits `agent_settled` and prompt dispositions. It starts a disposable daemon over a Unix socket and exercises representative CLI commands without model calls, including a prompted `new` check that default output does not leak raw daemon event names.
 
-`smoke:pi` runs the pinned Pi 1.0.0 executable from `node_modules/.bin/pi`
+`smoke:pi` runs the pinned Pi 1.0.2 executable from `node_modules/.bin/pi`
 against an HTTP model fixture bound to loopback. Disposable Pi settings,
 extensions, and sessions keep it independent of user configuration. It checks
 promptless sessions, extension-handled input, real prompt completion, session
