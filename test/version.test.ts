@@ -25,7 +25,7 @@ describe("Pi compatibility", () => {
       testedRange: "1.0.x",
       minimum: "1.0.0",
       maximumExclusive: "1.1.0",
-      tested: ["1.0.0"],
+      tested: ["1.0.2"],
     });
   });
 });

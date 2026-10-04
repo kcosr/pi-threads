@@ -816,7 +816,7 @@ Current compatibility target:
 
 | pi-threads | Tested Pi | Status |
 | --- | --- | --- |
-| Next release | 1.0.x (tested: 1.0.0) | Current supported range |
+| Next release | 1.0.x (tested: 1.0.2) | Current supported range |
 
 Worker assignment refuses unsupported `pi --version` values.
 

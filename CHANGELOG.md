@@ -8,7 +8,7 @@
   daemon-instance-qualified `sinceEventId`; numeric cursors are removed. Expired
   and prior-instance cursors fail explicitly with `eventHistoryLost`.
 
-- Require Pi 1.0.x (tested with 1.0.0); remove Pi 0.x worker compatibility.
+- Require Pi 1.0.x (tested with 1.0.2); remove Pi 0.x worker compatibility.
   The pinned Pi dependency now requires Node.js 22.19 or newer.
 
 ### Added
@@ -49,7 +49,7 @@
   without opening an event subscription. Correct the documented blocking JSON
   output to acceptance followed by a wait, without a final-text aggregate.
 
-- Update the pinned Pi protocol/runtime dependency to 1.0.0.
+- Update the pinned Pi protocol/runtime dependency to 1.0.2.
 
 ### Fixed
 
